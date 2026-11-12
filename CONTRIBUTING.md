@@ -147,7 +147,7 @@ A PR with no problem statement will be closed. If the problem is hard to articul
 
 PRs here merge on evidence: the description carries the test output, and for a UI change a screenshot or the transcript of the interactive case that shows it. CI runs on every PR; the first PR from a new fork waits for a maintainer to approve the workflow run, which happens once the review is under way.
 
-Releases are the maintainer's: a `v*` tag on `main` builds the installer, the portable exe and the CLI, publishes them with provenance attestations, and submits to winget and Chocolatey. Do not bump `installer/wagterm.iss` in a feature PR.
+Releases are the maintainer's: a `v*` tag created from `master` builds the installer, the portable exe and the CLI, and publishes them with provenance attestations on GitHub. Winget and Chocolatey publication, including the manual Chocolatey workflow, is disabled until WagTerm has its own package registrations and credentials. Do not bump `installer/wagterm.iss` in a feature PR.
 
 ## Native ABI and upstream history
 
