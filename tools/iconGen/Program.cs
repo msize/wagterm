@@ -6,11 +6,15 @@ using System.Drawing.Imaging;
 using System.IO;
 
 // wagterm app icon generator — three variants.
-//  v1 "signal" : chevron + block cursor + green agent-status dot (identity)
-//  v2 "clean"  : bold centered ">_" prompt, cyan, no dot (pure terminal)
-//  v3 "gradient": chevron with cyan->blue gradient + cursor + small dot
+//  v1 "signal" : dark chevron + white block cursor + white agent-status dot
+//  v2 "clean"  : bold centered ">_" prompt, no dot (pure terminal)
+//  v3 "gradient": shaded dark chevron + white cursor + small dot
 static class Program
 {
+    static readonly Color Background = Color.FromArgb(255, 0xF9, 0x73, 0x16);
+    static readonly Color Ink = Color.FromArgb(255, 0x1F, 0x29, 0x37);
+    static readonly Color Accent = Color.White;
+
     static void Main(string[] args)
     {
         string outDir = args.Length > 0 ? args[0] : ".";
@@ -48,10 +52,8 @@ static class Program
 
         using (var path = Rounded(tile, radius))
         {
-            using var grad = new LinearGradientBrush(
-                new PointF(tile.Left, tile.Top), new PointF(tile.Left, tile.Bottom),
-                Color.FromArgb(255, 0x25, 0x31, 0x40), Color.FromArgb(255, 0x10, 0x18, 0x22));
-            g.FillPath(grad, path);
+            using var background = new SolidBrush(Background);
+            g.FillPath(background, path);
 
             var sheen = new RectangleF(tile.Left, tile.Top, tile.Width, tile.Height * 0.5f);
             using (var sg = new LinearGradientBrush(
@@ -60,13 +62,9 @@ static class Program
             { var clip = g.Clip; g.SetClip(path); g.FillRectangle(sg, sheen); g.Clip = clip; }
 
             if (S >= 24)
-                using (var pen = new Pen(Color.FromArgb(60, 120, 170, 210), Math.Max(1f, f * 0.006f)))
+                using (var pen = new Pen(Color.FromArgb(60, Ink), Math.Max(1f, f * 0.006f)))
                     g.DrawPath(pen, path);
         }
-
-        Color cyan = Color.FromArgb(255, 0x38, 0xD7, 0xF0);
-        Color cyanLt = Color.FromArgb(255, 0x8A, 0xE2, 0xF2);
-        Color green = Color.FromArgb(255, 0x3D, 0xDC, 0x84);
 
         if (variant == "clean")
         {
@@ -74,14 +72,14 @@ static class Program
             float top = f * 0.30f, mid = f * 0.50f, bot = f * 0.70f;
             float cx = f * 0.285f, reach = f * 0.165f;
             float stroke = Math.Max(1.6f, f * 0.085f);
-            using (var pen = new Pen(cyan, stroke)
+            using (var pen = new Pen(Ink, stroke)
             { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
                 g.DrawLines(pen, new[] { new PointF(cx, top), new PointF(cx + reach, mid), new PointF(cx, bot) });
             // underscore
             float uw = f * 0.235f, uh = Math.Max(1.6f, f * 0.075f);
             float ux = f * 0.515f, uy = bot - uh * 0.2f;
             using (var up = Rounded(new RectangleF(ux, uy, uw, uh), uh / 2f))
-            using (var ub = new SolidBrush(cyanLt)) g.FillPath(ub, up);
+            using (var ub = new SolidBrush(Accent)) g.FillPath(ub, up);
         }
         else
         {
@@ -91,8 +89,8 @@ static class Program
             float stroke = Math.Max(1.4f, f * 0.072f);
             Brush strokeBrush = variant == "gradient"
                 ? new LinearGradientBrush(new PointF(cx, top), new PointF(cx + reach, bot),
-                    Color.FromArgb(255, 0x4A, 0xE0, 0xF5), Color.FromArgb(255, 0x3B, 0x82, 0xF6))
-                : new SolidBrush(cyan);
+                    Color.FromArgb(190, Ink), Ink)
+                : new SolidBrush(Ink);
             using (strokeBrush)
             using (var pen = new Pen(strokeBrush, stroke)
             { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
@@ -100,15 +98,15 @@ static class Program
 
             float curW = f * 0.175f, curH = f * 0.115f, curX = f * 0.545f, curY = bot - curH;
             using (var cp = Rounded(new RectangleF(curX, curY, curW, curH), Math.Min(curW, curH) * 0.32f))
-            using (var cb = new SolidBrush(cyanLt)) g.FillPath(cb, cp);
+            using (var cb = new SolidBrush(Accent)) g.FillPath(cb, cp);
 
             if (S >= 24)
             {
                 float dotR = f * (variant == "gradient" ? 0.045f : 0.052f);
                 float dcx = f * 0.70f, dcy = f * 0.335f;
-                using (var gb = new SolidBrush(Color.FromArgb(70, green.R, green.G, green.B)))
+                using (var gb = new SolidBrush(Color.FromArgb(70, Ink)))
                     g.FillEllipse(gb, dcx - dotR * 2.1f, dcy - dotR * 2.1f, dotR * 4.2f, dotR * 4.2f);
-                using (var db = new SolidBrush(green))
+                using (var db = new SolidBrush(Accent))
                     g.FillEllipse(db, dcx - dotR, dcy - dotR, dotR * 2, dotR * 2);
             }
         }
