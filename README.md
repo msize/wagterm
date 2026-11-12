@@ -59,14 +59,14 @@ The Settings window, on the Agent Status tab, where the status colors and the bl
 
 Release builds target **Windows x64**. Both artifacts are self-contained (no .NET runtime needed) and need no admin rights.
 
-The release configuration targets **msize/wagterm**. Downloads become available after the repository is renamed and the first WagTerm release is published. The upstream agwinterm packages do not install WagTerm. Scoop, winget and Chocolatey registration for WagTerm is separate and is not assumed to exist.
+Releases are published in **[msize/wagterm](https://github.com/msize/wagterm/releases)**. The upstream agwinterm packages do not install WagTerm. Scoop, winget and Chocolatey registration for WagTerm is separate and is not assumed to exist.
 
 Direct download, from the [releases page](https://github.com/msize/wagterm/releases):
 
 - **`wagterm-setup-<version>.exe`** — per-user installer (Start-menu shortcut and uninstaller).
 - **`wagterm-portable-<version>-win-x64.exe`** — a single self-contained exe, no installation; settings still live under `%LOCALAPPDATA%\wagterm`.
 
-The inherited package-publishing workflows require WagTerm's own package registrations and credentials before use.
+Package-publishing workflows are disabled until WagTerm has its own package registrations and credentials.
 
 Binaries are currently **unsigned**, so SmartScreen warns on first run → *More info → Run anyway*. Release artifacts carry **Sigstore build-provenance attestations**:
 

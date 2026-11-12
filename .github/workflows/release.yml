@@ -18,6 +18,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate release tag
+        shell: bash
+        env:
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -nE 's/^#define[[:space:]]+AppVersion[[:space:]]+"([^"]+)".*/\1/p' installer/wagterm.iss)
+          if [[ -z "$version" || "$RELEASE_REF" != refs/tags/* || "$RELEASE_TAG" != "v$version" ]]; then
+            echo "::error::Select tag v$version to publish the installer version declared in installer/wagterm.iss."
+            exit 1
+          fi
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -109,6 +121,9 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          name: WagTerm ${{ github.ref_name }}
+          draft: false
+          prerelease: false
           files: |
             installer/Output/wagterm-setup-*.exe
             installer/Output/wagterm-portable-*.exe
