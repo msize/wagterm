@@ -24,17 +24,17 @@ $root = Split-Path $PSScriptRoot -Parent
 $protoc = Join-Path $PSScriptRoot 'protoc\bin\protoc.exe'
 $proto = Join-Path $root 'proto'
 
-# C# ptyhost -> src/Agwinterm.Pty/Proto/ ; persist -> src/Agwinterm.Core/Persist/
-$csOut = Join-Path $root 'src\Agwinterm.Pty\Proto'
+# C# ptyhost -> src/Wagterm.Pty/Proto/ ; persist -> src/Wagterm.Core/Persist/
+$csOut = Join-Path $root 'src\Wagterm.Pty\Proto'
 New-Item -ItemType Directory -Force $csOut | Out-Null
 & $protoc -I $proto --csharp_out=$csOut (Join-Path $proto 'ptyhost.proto')
 if ($LASTEXITCODE -ne 0) { throw 'protoc csharp (ptyhost) failed' }
-$csCore = Join-Path $root 'src\Agwinterm.Core\Persist'
+$csCore = Join-Path $root 'src\Wagterm.Core\Persist'
 New-Item -ItemType Directory -Force $csCore | Out-Null
 & $protoc -I $proto --csharp_out=$csCore (Join-Path $proto 'persist.proto')
 if ($LASTEXITCODE -ne 0) { throw 'protoc csharp (persist) failed' }
 
-# Rust -> native/agwinterm-ptyhost/src/proto.rs (prost)
+# Rust -> native/wagterm-ptyhost/src/proto.rs (prost)
 Push-Location (Join-Path $PSScriptRoot 'prost-gen')
 $env:PROTOC = $protoc
 cargo run --quiet
@@ -56,6 +56,6 @@ if ($AgliteTermRoot) {
     Copy-Item (Join-Path $nanopb 'pb.h'), (Join-Path $nanopb 'pb_encode.*'), (Join-Path $nanopb 'pb_decode.*'), (Join-Path $nanopb 'pb_common.*') $liteOut -Force
 }
 
-"generated: C# ($csOut), Rust (native/agwinterm-ptyhost/src/proto.rs)"
+"generated: C# ($csOut), Rust (native/wagterm-ptyhost/src/proto.rs)"
 if ($liteOut) { "generated: C++ nanopb ($liteOut) - commit it in that repository too" }
 else { "SKIPPED the C++ handlers: agliteterm has its own repository. Pass -AgliteTermRoot <path> to regenerate them, or they keep the OLD schema." }

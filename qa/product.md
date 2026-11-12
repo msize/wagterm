@@ -1,4 +1,4 @@
-# agwinterm — QA adapter
+# wagterm — QA adapter
 
 How the `ui-qa` skill brings this product up, drives it and observes it. The cases in `qa/*.md`
 assume everything here.
@@ -6,12 +6,12 @@ assume everything here.
 ## Build
 
 ```powershell
-dotnet build Agwinterm.slnx -c Release
+dotnet build Wagterm.slnx -c Release
 ```
 
 **Two Release output roots exist and only one is fresh.** The solution sets Platform=x64, so the
-build writes `src\Agwinterm.Win32\bin\x64\Release\net10.0-windows\win-x64\`. The sibling
-`src\Agwinterm.Win32\bin\Release\net10.0-windows\win-x64\` is a leftover from an older
+build writes `src\Wagterm.Win32\bin\x64\Release\net10.0-windows\win-x64\`. The sibling
+`src\Wagterm.Win32\bin\Release\net10.0-windows\win-x64\` is a leftover from an older
 configuration and is never refreshed — launching it runs months-old code and reports green for a
 fix that is not there. That happened, on the bug half these cases exist for.
 
@@ -22,7 +22,7 @@ The native core is separate and can be stale in the same way — a mismatched AB
 tests before QA starts:
 
 ```powershell
-cd native\agwinterm-core; cargo build --release
+cd native\wagterm-core; cargo build --release
 ```
 
 ## Launching an isolated instance
@@ -31,8 +31,8 @@ cd native\agwinterm-core; cargo build --release
 
 ```powershell
 . tests\ui\lib.ps1
-$exe = Resolve-Binary $null 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
+$exe = Resolve-Binary $null 'wagterm.exe' 'Wagterm.Win32'
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
 $s = Start-Sandbox -Exe $exe -Ctl $ctl -Pipe 'qa1' -Conf @('copy-on-ctrl-c = true')
 ```
 
@@ -56,7 +56,7 @@ restore, and on its next save overwrite, the user's real session list. The persi
 
 ## Driving input
 
-`tests/ui/lib.ps1` defines `[AgwUi]`, all `PostMessage` to the sandbox window:
+`tests/ui/lib.ps1` defines `[WagUi]`, all `PostMessage` to the sandbox window:
 
 | call | what it does |
 | --- | --- |
@@ -73,7 +73,7 @@ found. Nothing is injected globally — the user keeps typing in their own windo
 
 ## Observing
 
-Through the real control client, `agwintermctl`, against the sandbox pipe:
+Through the real control client, `wagtermctl`, against the sandbox pipe:
 
 | helper | verb | what it answers |
 | --- | --- | --- |
@@ -86,8 +86,8 @@ Through the real control client, `agwintermctl`, against the sandbox pipe:
 only name lines the pane can SHOW, so anything the copy returns has to be findable in the visible
 text. That is why the checks compare the two rather than comparing against a literal.
 
-**Clear `AGWINTERM_SESSION_ID` / `AGWINTERM_PANE_ID` / `AGWINTERM_PIPE` before every ctl call.**
-`Send-Ctl` does it, and it matters more than it looks: a QA run is started from inside an agwinterm
+**Clear `WAGTERM_SESSION_ID` / `WAGTERM_PANE_ID` / `WAGTERM_PIPE` before every ctl call.**
+`Send-Ctl` does it, and it matters more than it looks: a QA run is started from inside an wagterm
 pane, so those variables are set, and a verb with no `--target` resolves *the caller's* session.
 Against a sandbox that session does not exist — `session text` comes back empty and `session type`
 is accepted and thrown away, with no error anywhere. A pass built on that is a pass over nothing;
@@ -120,6 +120,6 @@ is the runner. `tests/ui/lib.ps1` is plumbing — it holds no assertions and no 
 ## Also worth running before a PR
 
 ```powershell
-dotnet test Agwinterm.slnx -c Release           # 312 incl. SelectionBoundsTests
+dotnet test Wagterm.slnx -c Release           # 312 incl. SelectionBoundsTests
 pwsh tests\conformance\conformance.ps1          # control-API shape, shared with agliteterm
 ```

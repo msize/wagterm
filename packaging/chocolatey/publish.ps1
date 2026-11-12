@@ -12,7 +12,7 @@
 param(
     [Parameter(Mandatory)][string]$Version,      # e.g. 0.17.3 (no leading v)
     [Parameter(Mandatory)][string]$ApiKey,
-    [string]$Repository = 'yeroo/agwinterm',
+    [string]$Repository = 'msize/wagterm',
     [string]$OutputDir = $env:RUNNER_TEMP
 )
 
@@ -20,7 +20,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $OutputDir) { $OutputDir = [IO.Path]::GetTempPath() }
 
 $here  = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$asset = "agwinterm-portable-$Version-win-x64.exe"
+$asset = "wagterm-portable-$Version-win-x64.exe"
 $url   = "https://github.com/$Repository/releases/download/v$Version/$asset"
 
 # tools\ must contain ONLY the install/uninstall scripts and the shim marker. VERIFICATION.txt and
@@ -41,11 +41,11 @@ Write-Host "sha256: $sha"
 
 Push-Location $here
 try {
-    (Get-Content agwinterm.nuspec -Raw) -replace '(?<=<version>)[^<]+(?=</version>)', $Version |
-        Set-Content agwinterm.nuspec
+    (Get-Content wagterm.nuspec -Raw) -replace '(?<=<version>)[^<]+(?=</version>)', $Version |
+        Set-Content wagterm.nuspec
     $ps = 'tools/chocolateyinstall.ps1'
     $c = Get-Content $ps -Raw
-    $c = $c -replace 'download/v[^/]+/agwinterm-portable-[^'']+\.exe', "download/v$Version/$asset"
+    $c = $c -replace 'download/v[^/]+/wagterm-portable-[^'']+\.exe', "download/v$Version/$asset"
     $c = $c -replace "checksum64\s+= '[0-9a-fA-F]+'", "checksum64     = '$sha'"
     Set-Content $ps $c
 
@@ -54,8 +54,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'choco pack failed' }
 
     Write-Host "== push $Version =="
-    choco push (Join-Path $OutputDir "agwinterm.$Version.nupkg") --source https://push.chocolatey.org/ --api-key $ApiKey
+    choco push (Join-Path $OutputDir "wagterm.$Version.nupkg") --source https://push.chocolatey.org/ --api-key $ApiKey
     if ($LASTEXITCODE -ne 0) { throw 'choco push failed' }
 } finally { Pop-Location }
 
-Write-Host "== pushed agwinterm $Version =="
+Write-Host "== pushed wagterm $Version =="

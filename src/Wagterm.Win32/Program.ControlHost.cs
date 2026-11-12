@@ -1,0 +1,1571 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using Wagterm.Core;
+using Wagterm.Pty;
+using SharpGen.Runtime;
+using Vortice.Direct2D1;
+using Vortice.DirectWrite;
+using Vortice.DCommon;
+using Vortice.Mathematics;
+using static Wagterm.Win32.Win32;
+using Color = Wagterm.Core.Color;
+
+namespace Wagterm.Win32;
+
+/// <summary>Control-API host: the IWindowHost + ISessionHost bridges the control server drives.</summary>
+internal partial class Program
+{
+    public bool IsQuickSurface => _isQuickWindow;
+    public ISessionHost? AuxiliaryTarget(string? target) => target?.StartsWith("quick:", StringComparison.Ordinal) == true
+        && _quickHost?._quick is { } q && q.Id.StartsWith(target, StringComparison.Ordinal) ? _quickHost : null;
+    // ---- IWindowHost bridge (Wave F1b): app-level window management for the control API. Content
+    // verbs resolve through ResolveWindow(--window); window.* verbs act on the library. These use
+    // static library state + Frontmost, so they work regardless of which instance the server holds. ----
+    public ISessionHost? ResolveWindow(string? selector)
+    {
+        if (selector == "quick") return _quickHost;
+        if (string.IsNullOrEmpty(selector) || selector == "active") return Frontmost;
+        return ResolveOpen(selector);
+    }
+
+    public IReadOnlyList<WindowSnapshot> Windows()
+    {
+        lock (_windowIndex)
+            return _windowIndex.Select(m => new WindowSnapshot(m.Id, m.Name, m.IsOpen, m.Id == _frontmostId)).ToList();
+    }
+
+    // The window verbs all post on ONE window that is not closing — Frontmost, or the first live
+    // window while Frontmost sits inside its WM_DESTROY (it is reassigned only near the end of it).
+    // Every window shares the one UI thread, so any live one runs the action; one queue keeps the
+    // verbs FIFO across windows (`window select A`, `select B`, `select A` on per-window queues could
+    // drain A's two before B's one), at the price Post's doc names: the queue belongs to the window
+    // it was posted on, so a verb about a healthy B is stranded if that window is torn down first
+    // (true is best-effort; a verb that must know goes through InvokeOnUiQueued). A refusal is the
+    // withdrawn post's reason (NothingApplied): no window live — "the window is closing", true of
+    // every window then, where posting on Frontmost refused `window close --target B` as "closing"
+    // about a healthy B — or a live window's message queue refusing the wake-up.
+    private static Program LiveWindow()
+    {
+        var f = Frontmost;
+        if (!f._uiGone.IsCancellationRequested) return f;
+        lock (_windowIndex) return _byId.Values.FirstOrDefault(w => !w._uiGone.IsCancellationRequested) ?? f;
+    }
+
+    public string WindowNew(string? name)
+    {
+        string id = Guid.NewGuid().ToString();
+        LiveWindow().PostVerb(() =>
+        {
+            var m = new WinMeta { Id = id, Name = name ?? "", IsOpen = true };
+            CascadeGeometry(m);
+            lock (_windowIndex) _windowIndex.Add(m);
+            var win = CreateWindowInstance(m);
+            // The new window becomes frontmost; set both the static instance and the id together so the
+            // library's "active" flag and un-scoped (--window active) content verbs stay consistent even
+            // if the OS doesn't deliver WM_ACTIVATE (e.g. created while another process holds foreground).
+            Frontmost = win; _frontmostId = id;
+            SetForegroundWindow(win._hwnd);
+            SaveIndex();
+        });
+        return id;
+    }
+
+    public bool WindowSelect(string? selector)
+    {
+        var p = ResolveOpen(selector);
+        if (p is null) return false;
+        LiveWindow().PostVerb(() => { if (IsIconic(p._hwnd)) ShowWindow(p._hwnd, SW_RESTORE); SetForegroundWindow(p._hwnd); });
+        return true;
+    }
+
+    public bool WindowClose(string? selector)
+    {
+        var p = ResolveOpen(selector);
+        if (p is null) return false;
+        LiveWindow().PostVerb(() => DestroyWindow(p._hwnd)); // WM_DESTROY does teardown + index bookkeeping
+        return true;
+    }
+
+    public bool WindowDelete(string? selector)
+    {
+        var target = ResolveMeta(selector);
+        if (target is null) return false;
+        lock (_windowIndex) if (_windowIndex.Count <= 1) return false; // never delete the last window
+        LiveWindow().PostVerb(() =>
+        {
+            Program? open; lock (_windowIndex) _byId.TryGetValue(target.Id, out open);
+            if (open is not null) DestroyWindow(open._hwnd);
+            lock (_windowIndex)
+            {
+                _windowIndex.RemoveAll(m => m.Id == target.Id);
+                if (_frontmostId == target.Id) _frontmostId = _windowIndex.FirstOrDefault(m => m.IsOpen)?.Id ?? _windowIndex.FirstOrDefault()?.Id;
+            }
+            SweepWindowBackgrounds(target.Id); // remove watermark files for that window's sessions
+            _stateWriter.Delete(Path.Combine(AppDir, "windows", target.Id + ".json"), out _);   // fenced: a snapshot still queued cannot put it back
+            SaveIndex();
+        });
+        return true;
+    }
+
+    public bool WindowRename(string? selector, string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return false;
+        var target = ResolveMeta(selector);
+        if (target is null) return false;
+        LiveWindow().PostVerb(() =>
+        {
+            lock (_windowIndex) target.Name = name;
+            if (_byId.TryGetValue(target.Id, out var p)) { p.WinName = name; p.RequestRedraw(); }
+            SaveIndex();
+        });
+        return true;
+    }
+
+    public bool WindowResize(string? selector, int w, int h)
+    {
+        var p = ResolveOpen(selector);
+        if (p is null || w <= 0 || h <= 0) return false;
+        LiveWindow().PostVerb(() => { SetWindowPos(p._hwnd, IntPtr.Zero, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE); p.SaveState(); });
+        return true;
+    }
+
+    public bool WindowMove(string? selector, int x, int y)
+    {
+        var p = ResolveOpen(selector);
+        if (p is null) return false;
+        LiveWindow().PostVerb(() => { SetWindowPos(p._hwnd, IntPtr.Zero, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); p.SaveState(); });
+        return true;
+    }
+
+    public bool WindowZoom(string? selector)
+    {
+        var p = ResolveOpen(selector);
+        if (p is null) return false;
+        LiveWindow().PostVerb(() => { ShowWindow(p._hwnd, IsZoomed(p._hwnd) ? SW_RESTORE : SW_MAXIMIZE); p.SaveState(); });
+        return true;
+    }
+
+    private static Program? ResolveOpen(string? selector)
+    {
+        lock (_windowIndex)
+        {
+            if (string.IsNullOrEmpty(selector) || selector == "active") return Frontmost;
+            if (_byId.TryGetValue(selector, out var exact)) return exact;
+            foreach (var kv in _byId) if (kv.Key.StartsWith(selector)) return kv.Value;
+        }
+        return null;
+    }
+
+    private static WinMeta? ResolveMeta(string? selector)
+    {
+        lock (_windowIndex)
+        {
+            if (string.IsNullOrEmpty(selector) || selector == "active")
+                return _windowIndex.FirstOrDefault(m => m.Id == _frontmostId) ?? _windowIndex.FirstOrDefault();
+            return _windowIndex.FirstOrDefault(m => m.Id == selector) ?? _windowIndex.FirstOrDefault(m => m.Id.StartsWith(selector));
+        }
+    }
+
+    private static void CascadeGeometry(WinMeta m)
+    {
+        try
+        {
+            if (Frontmost is not null && GetWindowRect(Frontmost._hwnd, out RECT r))
+            { m.X = r.left + 32; m.Y = r.top + 32; m.W = Math.Max(400, r.right - r.left); m.H = Math.Max(300, r.bottom - r.top); }
+        }
+        catch { }
+    }
+
+    // ---- ISessionHost bridge (Program is the host) so the control server / wagtermctl drive
+    // this window. Un-scoped verbs act on this instance; the seam for future --window targeting. ----
+    public ISession? Resolve(string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return ActiveSurface()?.S;
+        // Pane ids include split panes and every auxiliary cover. In particular, a ctl launched
+        // inside scratch/overlay/quick inherits that cover's id as WAGTERM_SESSION_ID.
+        return FindControlPane(target)?.pane.S;
+    }
+
+    public IReadOnlyList<WorkspaceSnapshot> Tree()
+    {
+        Pane[] panes;
+        lock (_workspaces) panes = _workspaces.SelectMany(w => w.Sessions).SelectMany(s => s.Panes).ToArray();
+        var shells = ReadForegroundShells(panes);
+        lock (_workspaces)
+            return _workspaces.Select(w => new WorkspaceSnapshot(
+                w.Id, w.Name, ReferenceEquals(CurrentWorkspace(), w),
+                w.Sessions.Select(s =>
+                {
+                    var (status, statusChangedAt) = AggStatusAndAt(s);
+                    return new SessionSnapshot(s.Id, s.Name, ReferenceEquals(s, _active), status,
+                        s.Overlay.Term is not null, UnreadOf(s), s.Flagged, s.BgPath is not null,
+                        FocusedPane: Math.Clamp(s.Active, 0, Math.Max(0, s.Panes.Count - 1)), PaneCount: s.Panes.Count,
+                        StatusBlink: AggBlink(s), OverlaySize: s.Overlay.SizePercent,
+                        SplitRatios: s.Panes.Select(p => (double)p.Ratio).ToList(),
+                        PaneIds: s.Panes.Select(p => p.Id).ToList(),
+                        RestoreCommands: s.Panes.Select(p => p.RestoreCommand ?? "").ToList(),
+                        StatusChangedAt: statusChangedAt,
+                        Context: s.Context,
+                        CapturedCommands: s.Panes.Select(p => p.CapturedCommand ?? "").ToList(),
+                        Axis: s.Axis,
+                        // The open PANE slots as their words, in pane order (P5): a swap reorders the
+                        // panes and the slots ride on them, so `["right"]` becomes `["left"]` by
+                        // construction. Empty = the server omits the key.
+                        PaneOverlays: s.Panes.Select((p, i) => (p, i)).Where(t => t.p.Overlay.Term is not null)
+                                             .Select(t => OverlayPanes.Word(t.i)).ToList(), Hud: s.Hud,
+                        ForegroundShells: s.Panes.Select(p => p.S.HasExited ? null : shells.GetValueOrDefault(p)).ToList(),
+                        Link: s.Link);
+                }).ToList()
+            , Collapsed: !w.Expanded, DefaultDir: w.DefaultDir)).ToList();
+    }
+
+    // Read-back snapshot: plain field reads + a Win32 query, safe from the pipe thread (worst case slightly stale).
+    public WindowStateSnapshot WindowState()
+    {
+        var a = _active;
+        return new WindowStateSnapshot(
+            SidebarVisible: _sidebarW > 0, Fullscreen: _fullscreen, Maximized: IsZoomed(_hwnd),
+            QuickTerminalVisible: _quickHost?._quickVisible == true,
+            // ActiveSession is the NAME; session.context is not a name and is not folded in — it is read from the tree (P3).
+            ActiveWorkspace: CurrentWorkspace()?.Name, ActiveSession: a is null ? null : (a.CustomName ?? a.Name));
+    }
+
+    /// <summary>
+    /// Live cell + pane metrics for `session.metrics`, in DEVICE pixels. Measured on the UI thread:
+    /// <see cref="Metrics"/> memoises text formats in a static dictionary the render path writes to,
+    /// so reading it from the pipe thread would race a font rebuild — and taking the layout and the
+    /// cell size in one hop also keeps them describing the same instant.
+    ///
+    /// The numbers are the ones the renderer actually draws with (<see cref="PaneLayout"/> +
+    /// <c>Metrics(pane.FontSize)</c>), converted DIP→device by <see cref="Scale"/>. The exact grid
+    /// extent accumulates the fractional cell advance before rounding, avoiding per-cell error.
+    /// </summary>
+    public PaneMetricsSnapshot? PaneMetrics(string? target)
+    {
+        PaneMetricsSnapshot? snap = null;
+        InvokeOnUi(() => { snap = MeasurePane(target); return ""; });
+        return snap;
+    }
+
+    private PaneMetricsSnapshot? MeasurePane(string? target)
+    {
+        // Same resolution order as Resolve(). A pane targeted by its WAGTERM_PANE_ID must land
+        // on ITS column, while an exact session id must beat a derived scratch/overlay id prefix.
+        Ses? ses = null; Pane? pane = null;
+        if (string.IsNullOrEmpty(target) || target == "active")
+        {
+            ses = _active;
+            pane = ActiveSurface();
+        }
+        else if (FindControlPane(target) is { } hit)
+        {
+            ses = hit.ses;
+            pane = hit.pane;
+        }
+        if (pane is null || (ses is null && !ReferenceEquals(pane, _cover))) return null;
+
+        var (_, cwDip, chDip) = Metrics(pane.FontSize);
+        bool laidOut;
+        if (ReferenceEquals(pane, _cover))
+        {
+            var (_, _, w, h) = CoverRect();
+            laidOut = w > 0 && h > 0;
+        }
+        else
+        {
+            laidOut = false;
+            // A pane overlay term (P5) is laid out as ITS pane's box: `session metrics --target
+            // <overlay id>` answers the box the term was regridded to (RegridSession), with its own metrics.
+            foreach (var (p, _, _, w, h) in PaneLayout(ses!))
+                if (ReferenceEquals(p, pane) || ReferenceEquals(p.Overlay.Term, pane)) { laidOut = w > 0 && h > 0; break; }
+        }
+        return laidOut
+            ? PaneMetricsSnapshot.FromDipGrid(pane.S.Cols, pane.S.Rows, cwDip, chDip, Scale)
+            : null;
+    }
+
+    // The workspace is resolved HERE, synchronously, before an id exists — as SessionToWorkspace and
+    // WorkspaceSelect already do through FindWs. Before P2 the id was minted first, returned at once,
+    // and the posted lambda resolved the workspace afterwards with a silent fallback to the active
+    // one: the reply was committed before the question was asked, so an unknown --workspace could
+    // only ever "succeed". Now an unknown one is refused (decision 1; SessionNewWorkspaces) and
+    // nothing is posted, so no session exists behind an ok:false reply. Only the creation itself
+    // (and, with --create-workspace, the new workspace) still runs on the UI thread.
+    // --workspace beside --workspace-name is refused by the server before this is reached; if a
+    // direct caller passes both anyway, the id wins, exactly as it did before P2.
+    // With NEITHER named, the answer is the CALLER's workspace (task 5a): `caller` is the pane that
+    // ran `session new` (the CLI sends its WAGTERM_SESSION_ID), so an agent gets sessions next to
+    // itself however the user has clicked around meanwhile. Only a missing or stale caller reaches
+    // the active workspace, and that too is read here, synchronously, rather than inside the Post.
+    public string NewSession(string? name, string? cwd, string? workspace, string? command = null,
+        string? workspaceName = null, bool createWorkspace = false, string? profile = null, bool noSelect = false, bool wait = false,
+        string? caller = null, string? commandMode = null)
+    {
+        if (!SessionCommand.TryCreate(command, commandMode, wait, profile, out var launch, out var error))
+            return ISessionHost.RefusePrefix + error;
+        Workspace? ws = null;
+        string? newWorkspaceName = null;   // set = create this workspace on the UI thread, then the session in it
+        if (!string.IsNullOrEmpty(workspace))
+        {
+            ws = FindWs(workspace);   // id, id-prefix, or "active"; never a name
+            if (ws is null) return ISessionHost.RefusePrefix + SessionNewWorkspaces.UnknownId(workspace);
+        }
+        else if (!string.IsNullOrEmpty(workspaceName))
+        {
+            lock (_workspaces) ws = _workspaces.FirstOrDefault(w => string.Equals(w.Name, workspaceName, StringComparison.OrdinalIgnoreCase));
+            if (ws is null)
+            {
+                if (!createWorkspace) return ISessionHost.RefusePrefix + SessionNewWorkspaces.UnknownName(workspaceName);
+                newWorkspaceName = workspaceName;
+            }
+        }
+        else
+        {
+            // Nothing named: the workspace of the caller's own pane. A scratch/overlay pane belongs
+            // to the session it covers; the quick terminal belongs to no workspace and falls through.
+            // A caller that does not resolve — the pane was closed after it typed the command, a
+            // script run from an unrelated shell, a pane in another window — is NOT refused: that
+            // would break a working script in order to fix a preference.
+            if (!string.IsNullOrEmpty(caller) && FindPaneById(caller) is { ses: { } owner }) ws = owner.Ws;
+            // The active workspace is the LAST answer, not the first. "Active" is a global the UI
+            // rewrites on every click, every selection and every workspace.new over the API, so an
+            // agent creating several sessions used to scatter them wherever the user had last
+            // clicked. Reading it here rather than in the Post at least pins it to the moment of the
+            // call instead of to whenever the UI thread gets round to the lambda.
+            ws ??= ActiveWorkspace();
+        }
+        string id = Guid.NewGuid().ToString();
+        PostVerb(() =>
+        {
+            // The resolve above ran on the pipe thread; this runs on the UI thread some milliseconds
+            // later, and in between the user (or a posted workspace.delete) can have removed `ws`
+            // from the list. CreateSession would still add the session to that detached Workspace
+            // object: not in the tree, not findable by any verb, yet SetActive would make it the
+            // active session - a phantom behind an id the caller already holds. The id is committed,
+            // so a refusal is no longer possible; the active workspace is the least-wrong home for a
+            // session that has to exist somewhere the caller can see it.
+            bool gone;
+            lock (_workspaces) gone = ws is not null && !_workspaces.Contains(ws);
+            if (gone) ws = ActiveWorkspace();
+            Workspace target;
+            if (ws is not null) target = ws;
+            else
+            {
+                // The name lookup ran on the pipe thread and MISSED; the create happens here. Two
+                // `--workspace-name build --create-workspace` calls dispatched while the UI thread
+                // was busy (a modal menu, a drag, a heavy repaint) both missed up there, and before
+                // P2 hoisted the lookup they could not both create, because the whole resolve-or-
+                // create ran in this lambda and lambdas are serial on the UI thread. So look the
+                // name up AGAIN here, where every create happens and nothing can interleave: the
+                // second lambda finds the first one's workspace and reuses it. (revmux r1 Major.)
+                lock (_workspaces) target = _workspaces.FirstOrDefault(w => string.Equals(w.Name, newWorkspaceName, StringComparison.OrdinalIgnoreCase))!;
+                target ??= CreateWorkspace(Guid.NewGuid().ToString(), newWorkspaceName!);
+            }
+            // --no-select creates the session in the background, leaving the current focus/selection (agterm #250).
+            CreateSession(id, name, cwd, target, makeActive: !noSelect, profileName: profile, sessionCommand: launch);
+        });
+        return id;
+    }
+
+    public bool SelectSession(string target)
+    {
+        var ses = Find(target);
+        if (ses is null) return false;
+        PostVerb(() => SetActive(ses));
+        return true;
+    }
+
+    public bool CloseSession(string target)
+    {
+        var ses = Find(target);
+        if (ses is null) return false;
+        PostVerb(() => CloseSessionInternal(ses));
+        return true;
+    }
+
+    public string NewWorkspace(string? name, string? defaultDir = null)
+    {
+        string id = Guid.NewGuid().ToString();
+        PostVerb(() =>
+        {
+            var ws = CreateWorkspace(id, name);
+            if (!string.IsNullOrEmpty(defaultDir))
+            {
+                if (TrySetWorkspaceDefaultDir(ws, defaultDir, out _))
+                {
+                    SaveState();
+                    EmitEvent("tree");
+                }
+            }
+        });
+        return id;
+    }
+
+    public string WorkspaceDefaultDir(string? target, string? dir)
+    {
+        return InvokeOnUiQueued(() =>
+        {
+            var ws = string.IsNullOrEmpty(target) || target == "active" ? ActiveWorkspace() : FindWs(target);
+            if (ws is null) return ISessionHost.RefusePrefix + WorkspaceDefaultDirs.NoWorkspace;
+            if (!TrySetWorkspaceDefaultDir(ws, dir, out string? refuse))
+                return ISessionHost.RefusePrefix + refuse!;
+            RequestRedraw();
+            SaveState();
+            EmitEvent("tree");
+            return WorkspaceDefaultDirs.Reply(ws.Id, ws.DefaultDir);
+        });
+    }
+
+    public bool SetFontSize(string? target, string op)
+    {
+        int delta = op switch { "inc" => 1, "dec" => -1, _ => 0 }; // reset otherwise
+        if (string.IsNullOrEmpty(target) || target == "active")
+        {
+            return InvokeOnUiQueued(() =>
+            {
+                if (ActiveSurface() is null) return false;
+                ChangeFontSize(delta); return true;
+            });
+        }
+        if (FindControlPane(target) is not { } targetPane) return false;
+        PostVerb(() => ZoomPane(targetPane, delta));
+        return true;
+    }
+
+    /// <summary>Control-API dashboard: open over explicit session ids (comma/space separated; empty =
+    /// most-recently-used), close it, and optionally pin a font size. (agterm #202 CLI.)</summary>
+    public bool Dashboard(bool close, string? ids, int fontSize)
+    {
+        PostVerb(() =>
+        {
+            if (close) { CloseDashboard(); return; }
+            List<Ses>? list = null;
+            if (!string.IsNullOrWhiteSpace(ids))
+                list = ids!.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                           .Select(id => Find(id)).Where(s => s is not null).Cast<Ses>().ToList();
+            OpenDashboard(list, fontSize);
+        });
+        return true;
+    }
+
+    // ---- Wave A1 verbs ----
+    public void SessionGo(string dir) => PostVerb(() => SessionGoInternal(dir));
+
+    public bool SessionReorder(string? target, string dir)
+    {
+        var s = Find(target);
+        if (s is null) return false;
+        PostVerb(() => { lock (_workspaces) ReorderInList(s.Ws.Sessions, s, dir); RequestRedraw(); SaveState(); });
+        return true;
+    }
+
+    public bool SessionToWorkspace(string? target, string workspace)
+    {
+        var s = Find(target); var ws = FindWs(workspace);
+        if (s is null || ws is null) return false;
+        PostVerb(() => MoveSession(s, ws));
+        return true;
+    }
+
+    // session.rename (#287). Resolution is session.context's (FindSesForTarget: exact pane, exact
+    // session, pane prefix, session prefix / name; a split pane's id or a scratch or overlay cover id
+    // lands on the session it belongs to, the window-level quick terminal on nothing) — and the reply
+    // now SAYS which session that was. A pane id reaching the session it belongs to is the right
+    // resolution and stays: a pane carries no label of its own (the sidebar draws one row per
+    // session, the state file keeps one name per session), and a program inside a pane is handed
+    // that PANE's id as WAGTERM_SESSION_ID, which the CLI sends when no --target is passed — so a
+    // bare `session rename <name>` from inside a split pane IS a pane-targeted rename and means the
+    // session. What was wrong was answering the constant "renamed" for it, leaving the caller unable
+    // to see which session took the name (session.restore's pre-P2 defect, one verb over).
+    //
+    // The write goes through the FIFO queued hop rather than Post(...), for session.context's reason:
+    // the reply carries the name IN EFFECT, read back off the session after the write. The target is
+    // resolved INSIDE the hop, so a session closed between the request and the write is refused
+    // rather than written to. A hop that cannot be queued (the window is closing, or its message
+    // queue refused the wake-up), that the window closes under, or that times out throws, which
+    // Dispatch turns into ok:false with nothing applied (#228 item 5). The server has already refused
+    // a blank name. The rename does not touch Context — the name and the context are two fields, and
+    // rename edits one of them.
+    public string SessionRename(string? target, string name)
+    {
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = FindSesForTarget(target);
+            if (ses is null) return ISessionHost.RefusePrefix + SessionNames.NoSession;
+            ses.Name = name; ses.CustomName = name;   // CustomName drives the title bar
+            RequestRedraw(); SaveState();
+            return SessionNames.Reply(ses.Id, ses.CustomName);
+        });
+    }
+
+    // session.context (P3). Resolution is rename's (FindSesForTarget: exact pane, exact session, pane
+    // prefix, session prefix / name; a scratch or overlay cover id lands on the session it covers, the
+    // quick terminal on nothing). The write goes through the FIFO queued hop rather than Post(...);
+    // return true, because the reply carries the value IN EFFECT, read back off the session after the
+    // write — P2's session.restore round found that Post-and-return reports the value REQUESTED. A
+    // hop that cannot be queued (the window is closing, or its message queue refused the wake-up —
+    // NothingApplied names which) or that the window closes under throws, which
+    // Dispatch turns into ok:false with nothing applied. A hop that TIMES OUT (15 s, a message loop
+    // that is alive but not pumping) is ok:false too, but the action stays queued and may still run
+    // when the loop resumes — the reply says so, in InvokeOnUiQueued's own words (revmux r1).
+    // The target is resolved INSIDE the hop, so a session closed between the request and the write is
+    // refused rather than written to. The server has already normalized and validated the text.
+    public string SessionContext(string? target, string? context)
+    {
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = FindSesForTarget(target);
+            if (ses is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+            ses.Context = context;
+            RequestRedraw(); SaveState();
+            return SessionContexts.Reply(ses.Id, ses.Context);
+        });
+    }
+
+    // session.link: session.context's resolution and threading (the FIFO queued hop, the session resolved
+    // inside it, the reply read back off the session after the write). The server has already
+    // normalized and validated the URL.
+    public string SessionLink(string? target, string? link)
+    {
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = FindSesForTarget(target);
+            if (ses is null) return ISessionHost.RefusePrefix + SessionLinks.NoSession;
+            ses.Link = link;
+            RequestRedraw(); SaveState();
+            return SessionLinks.Reply(ses.Id, ses.Link);
+        });
+    }
+
+    // session.link.open: the same hop; the browser is launched from the UI thread, as the hot-key does.
+    public string SessionLinkOpen(string? target)
+    {
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = FindSesForTarget(target);
+            if (ses is null) return ISessionHost.RefusePrefix + SessionLinks.NoSession;
+            if (ses.Link is null) return ISessionHost.RefusePrefix + SessionLinks.NoLink;
+            OpenLink(ses.Link);
+            return SessionLinks.Reply(ses.Id, ses.Link, opened: true);
+        });
+    }
+
+    public bool WorkspaceRename(string? target, string name)
+    {
+        var ws = FindWs(target);
+        if (ws is null || string.IsNullOrWhiteSpace(name)) return false;
+        PostVerb(() => { ws.Name = name; RequestRedraw(); SaveState(); });
+        return true;
+    }
+
+    // Clone a session by target (agterm #234) — new session, same cwd + profile. Returns its new id.
+    public string DuplicateSession(string? target) => InvokeOnUiQueued(() =>
+    {
+        var source = FindSesForTarget(target);
+        if (source is null) throw new InvalidOperationException("session not found");
+        string id = Guid.NewGuid().ToString();
+        if (DuplicateSession(source, id) is null) throw new InvalidOperationException("session not found");
+        return id;
+    });
+
+    // Collapse/expand a single workspace by id (agterm #272). target null/empty = the active workspace.
+    public bool WorkspaceCollapse(string? target, bool expand)
+    {
+        var ws = string.IsNullOrEmpty(target) ? ActiveWorkspace() : FindWs(target);
+        if (ws is null) return false;
+        PostVerb(() => { lock (_workspaces) ws.Expanded = expand; RequestRedraw(); SaveState(); });
+        return true;
+    }
+
+    public bool WorkspaceDelete(string? target)
+        => InvokeOnUiQueued(() => FindWs(target) is { } ws && DeleteWorkspace(ws));
+
+    public bool WorkspaceSelect(string? target) => InvokeOnUiQueued(() => SelectWorkspaceCore(FindWs(target)));
+
+    public bool WorkspaceReorder(string? target, string dir)
+    {
+        var ws = FindWs(target);
+        if (ws is null) return false;
+        PostVerb(() => { lock (_workspaces) ReorderInList(_workspaces, ws, dir); RequestRedraw(); SaveState(); });
+        return true;
+    }
+
+    private const string SplitNotFound = ISessionHost.RefusePrefix + "session not found";
+
+    // session.split (P4): the reply is the pane id the op produced or found, read back off the session
+    // INSIDE the FIFO queued hop (SessionContext's threading) — the old Post(...); return true answered
+    // the constant "split" for a request that had merely been dropped on the queue, so the caller
+    // could not address the shell it asked for, and `on` when already split said ok having done
+    // nothing. Resolution stays on the caller's thread first (#230): a bad target answers a refusal
+    // with nothing queued; the hop re-resolves so a session closed in between is refused, not split.
+    // Same order as SessionScratch: null/"active" is the active session; otherwise a session id, a
+    // pane id, or a prefix of either. A hop that cannot be queued or run throws, which Dispatch
+    // turns into ok:false (after a timeout the action stays queued and the reply says so — #234).
+    public string Split(string? target, string op, string? axis)
+    {
+        if (FindSesForTarget(target) is null) return SplitNotFound;
+        // The axis word is the server's to validate (SplitAxes.TryParse); SplitOp applies it — a set
+        // on `on`/a splitting toggle, a live re-orientation of an already-split session, ignored by off.
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = FindSesForTarget(target);
+            if (ses is null) return SplitNotFound;
+            SplitOp(op, ses, axis);
+            // By position, not history: while split, the split pane is the one in slot 1 (SplitPane
+            // inserts it after the single pane it split); after a collapse the survivor is slot 0.
+            // So `on` when already split names the existing split pane, `off` when already single
+            // names the only pane, and toggle names whichever it produced.
+            return ses.Panes.Count > 1 ? ses.Panes[1].Id : ses.Panes[0].Id;
+        });
+    }
+
+    // session.split.close (P4): close the targeted pane — either side — and answer the survivor's id.
+    // The same two-step shape as Split: resolve on the caller's thread so an unknown target, a cover or
+    // a one-pane session answers a refusal with nothing queued (#230), then ONE FIFO queued hop that
+    // re-resolves (a pane that exited or was closed by another client in between is refused, not
+    // double-closed — its removal is ahead of us in the same queue), closes through ClosePane (the
+    // primitive Ctrl+Shift+W, `split off` and a split shell's exit share) and reads the survivor back off
+    // ses.Panes[0]. Resolution: null/"active" is the active session's focused pane (what Ctrl+Shift+W
+    // closes); else FindControlPane's order, so the session id names the pane that carries it (exact
+    // pane wins — the order win32-control.ps1 pins) and a session NAME names the focused pane. A hop that
+    // cannot be queued or run throws, which Dispatch turns into ok:false (#234 wording).
+    public string SplitClose(string? target)
+    {
+        if (ResolveSplitClose(target, out var early) is null) return ISessionHost.RefusePrefix + early;
+        return InvokeOnUiQueued(() =>
+        {
+            var hit = ResolveSplitClose(target, out var refusal);
+            if (hit is null) return ISessionHost.RefusePrefix + refusal;
+            ClosePane(hit.Value.ses, hit.Value.pane);
+            return hit.Value.ses.Panes[0].Id;   // the survivor: ClosePane leaves exactly one pane, in slot 0
+        });
+    }
+
+    /// <summary>The pane <c>session split close</c> would close, or null with the refusal (SplitCloseReply's
+    /// wording) — nothing is touched here, so it is safe to run on the pipe thread first and again inside
+    /// the hop.</summary>
+    private (Pane pane, Ses ses)? ResolveSplitClose(string? target, out string? refusal)
+    {
+        refusal = null;
+        if (string.IsNullOrEmpty(target) || target == "active")
+        {
+            var a = _active;
+            if (a is null) { refusal = SplitCloseReply.NoActiveSession; return null; }
+            if (a.Panes.Count <= 1) { refusal = SplitCloseReply.SinglePane(a.Id); return null; }
+            return (a.ActivePane, a);
+        }
+        var hit = FindControlPane(target);   // the content verbs' resolver: exact pane, exact session, pane prefix, session prefix / name
+        if (hit is null) { refusal = SplitCloseReply.UnknownTarget(target); return null; }
+        if (hit.Value.cover || hit.Value.ses is null) { refusal = SplitCloseReply.CoverPane(hit.Value.pane.Id); return null; }
+        if (hit.Value.ses.Panes.Count <= 1) { refusal = SplitCloseReply.SinglePane(hit.Value.ses.Id); return null; }
+        return (hit.Value.pane, hit.Value.ses);
+    }
+
+    // session.swap (P4): exchange the two panes of the targeted session and answer its split block after
+    // the swap. The Split / SplitClose two-step: resolve on the caller's thread so an unknown target, a
+    // cover or a one-pane session answers a refusal with nothing queued (#230), then ONE FIFO queued hop
+    // that re-resolves (a session collapsed or closed by another client in between is refused, not
+    // swapped from a stale view), swaps through SwapPanes and reads the order, focus and axis back off
+    // the session. Resolution: null/"active" is the active session; else FindControlPane's order — a
+    // session id, either pane's id, a prefix, or a name — and the session the hit belongs to is the one
+    // swapped (a pane id names its session here; the verb acts on the pair, never on one side). A hop
+    // that cannot be queued or run throws, which Dispatch turns into ok:false (#234 wording).
+    public SwapResult Swap(string? target)
+    {
+        if (ResolveSwap(target, out var early) is null) return SwapResult.Refuse(early!);
+        return InvokeOnUiQueued(() =>
+        {
+            var ses = ResolveSwap(target, out var refusal);
+            if (ses is null) return SwapResult.Refuse(refusal!);
+            SwapPanes(ses);
+            List<string> ids;
+            lock (_workspaces) ids = ses.Panes.Select(p => p.Id).ToList();
+            return new SwapResult(ses.Id, ids, ses.Active, ses.Axis);
+        });
+    }
+
+    /// <summary>The session <c>session swap</c> would act on, or null with the refusal (SwapReply's wording)
+    /// — nothing is touched here, so it is safe to run on the pipe thread first and again inside the hop.</summary>
+    private Ses? ResolveSwap(string? target, out string? refusal)
+    {
+        refusal = null;
+        Ses? ses;
+        if (string.IsNullOrEmpty(target) || target == "active")
+        {
+            ses = _active;
+            if (ses is null) { refusal = SwapReply.NoActiveSession; return null; }
+        }
+        else
+        {
+            var hit = FindControlPane(target);   // the content verbs' resolver: exact pane, exact session, pane prefix, session prefix / name
+            if (hit is null) { refusal = SwapReply.UnknownTarget(target); return null; }
+            if (hit.Value.cover || hit.Value.ses is null) { refusal = SwapReply.CoverPane(hit.Value.pane.Id); return null; }
+            ses = hit.Value.ses;
+        }
+        if (ses.Panes.Count <= 1) { refusal = SwapReply.SinglePane(ses.Id); return null; }
+        return ses;
+    }
+
+    // Both answer with state (a refusal must mean nothing moved), so they run in the FIFO UI hop and
+    // read the active session INSIDE it — the axis a direction is judged against is the one the
+    // session has when the move happens, not the one the pipe thread saw a moment earlier (P4).
+    public string FocusPaneDir(string dir)
+        => InvokeOnUiQueued(() =>
+        {
+            var ses = _active;
+            if (ses is null || ses.Panes.Count < 2) return ISessionHost.RefusePrefix + SplitAxes.NotSplit;
+            if (!SplitAxes.TryFocusIndex(dir, ses.Axis, ses.Active, out int index, out string? refusal)) return ISessionHost.RefusePrefix + refusal;
+            ses.Active = Math.Clamp(index, 0, ses.Panes.Count - 1);
+            SyncSession();   // the focused pane's SURFACE (its overlay while one is open — P5)
+            RequestRedraw();
+            return "focus";
+        });
+
+    public string ResizeSplit(double? ratio, int growLeft, int growRight, int growTop, int growBottom)
+        => InvokeOnUiQueued(() => ResizeActiveSplitInternal(ratio, growLeft, growRight, growTop, growBottom) is { } refusal
+            ? ISessionHost.RefusePrefix + refusal
+            : "resized");
+
+    public IReadOnlyList<string> ThemeList() => _allThemes.Select(t => t.Name).ToList();
+
+    public bool ThemeSet(string name)
+    {
+        if (!_allThemes.Any(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase))) return false;
+        PostVerb(() => CommitTheme(FindTheme(name)));
+        return true;
+    }
+
+    public string KeymapReload() { PostVerb(ReloadKeymap); return "keymap reload requested"; }
+
+    public string ConfigSet(string key, string value) => InvokeOnUiQueued(() => ConfigSetInternal(key, value));
+    public string ConfigGet(string key) => InvokeOnUi(() => ConfigValue(key.Trim().ToLowerInvariant()));
+    public string ConfigList() => InvokeOnUi(() => string.Join("\n", ConfigKeys.Select(k => $"{k} = {ConfigValue(k)}")));
+    public string SettingsOpen() => InvokeOnUiQueued(() =>
+    {
+        if (_nativePick is not null) throw new InvalidOperationException("a picker owns this window");
+        OpenSettingsWindow(); return "settings opened";
+    });
+
+    public string ProfilesList() => InvokeOnUi(() => string.Join("\n", _profileCfg.Profiles.Select(p =>
+        $"{(p.Name.Equals(_profileCfg.Default, StringComparison.OrdinalIgnoreCase) ? "*" : " ")} {p.Name}\t{p.Command}{(p.Args is { Length: > 0 } a ? " " + string.Join(" ", a) : "")}")));
+    public string ProfilesReload() => InvokeOnUi(() => { _profileCfg = Wagterm.Pty.ShellProfiles.Load(AppDir); RequestRedraw(); return $"{_profileCfg.Profiles.Count} profiles loaded"; });
+
+    public string RestoreClear()
+    {
+        try
+        {
+            // Through the writer, unconditionally: a snapshot still queued or in flight is older than
+            // this delete and cannot put the file back, and the next save with the same bytes writes
+            // rather than skips. A File.Exists guard here would return "no restore state" while a
+            // pre-clear snapshot sat in the settle, and that snapshot would then land.
+            if (!_stateWriter.Delete(StatePath, out string? why, out bool removed)) return "error: " + why;
+            return removed ? "restore state cleared" : "no restore state";
+        }
+        catch (Exception ex) { return "error: " + ex.Message; }
+    }
+
+    public void SidebarOp(string op) => PostVerb(() => SidebarOpInternal(op));
+
+    // "<visible|hidden> <tree|flagged> <width>": the width is _sidebarWShown, the one in effect when
+    // shown — beside "hidden" it is the width the next show will use, not a claim that it is on screen.
+    public string SidebarState() => InvokeOnUi(() =>
+        (_sidebarW > 0 ? "visible" : "hidden") + " " + (_sidebarMode == SidebarMode.Flagged ? "flagged" : "tree")
+        + " " + (int)_sidebarWShown);
+
+    // sidebar.width. No clamp: ControlServer.TrySidebarWidth has refused anything outside
+    // SidebarWidths.Min..Max, so a value here is one the chrome can draw. A set while visible goes
+    // through SidebarWidthChanged, the same re-layout ToggleSidebar uses; a set while hidden only
+    // updates the remembered width (and persists it), and the snapshot's Visible=false is what the
+    // server turns into "remembered, not applied". InvokeOnUi, not Post: the reply must describe the
+    // width after the change, not the width at the moment the request was queued.
+    public Wagterm.Pty.SidebarWidthSnapshot SidebarWidth(int? set)
+    {
+        Wagterm.Pty.SidebarWidthSnapshot? snap = null;
+        InvokeOnUi(() =>
+        {
+            if (set is { } w)
+            {
+                _sidebarWShown = w;
+                if (_sidebarW > 0) { _sidebarW = w; SidebarWidthChanged(); }
+                else SaveState();
+            }
+            snap = new Wagterm.Pty.SidebarWidthSnapshot((int)_sidebarWShown, _sidebarW > 0);
+            return "";
+        });
+        return snap ?? new Wagterm.Pty.SidebarWidthSnapshot((int)_sidebarWShown, _sidebarW > 0);
+    }
+
+    public string BroadcastOp(string op) => InvokeOnUi(() =>
+    {
+        bool want = op switch { "on" => true, "off" => false, "state" or "get" => _broadcast, _ => !_broadcast };
+        if (op is not ("state" or "get") && want != _broadcast) ToggleBroadcast();
+        return _broadcast ? "on" : "off";
+    });
+
+    public string ReadOnlyOp(string? target, string op) => InvokeOnUi(() =>
+    {
+        if (!SessionOperations.IsReadOnlyOp(op)) return SessionOperations.UnknownOp(op);
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        bool want = op switch { "on" => true, "off" => false, "state" or "get" => p.ReadOnly, _ => !p.ReadOnly };
+        if (op is not ("state" or "get")) { p.ReadOnly = want; RequestRedraw(); }
+        return p.ReadOnly ? "on" : "off";
+    });
+
+    public bool SessionSeen(string? target)
+    {
+        var ses = FindSesForTarget(target);
+        if (ses is null) return false;
+        PostVerb(() => { ClearUnread(ses); RequestRedraw(); });
+        return true;
+    }
+
+    /// <summary>Plain text of the LAST COMPLETED command's output (FTCS marks) — the
+    /// agent-workflow primitive: "give me what that command printed".</summary>
+    public string SessionOutput(string? target)
+    {
+        var pane = PaneForTarget(target);
+        if (pane is null) return "";
+        TerminalEmulator.ShellMark? m;
+        lock (pane.S.SyncRoot) m = pane.S.Emulator.Marks.LastOrDefault(x => x.EndLine >= 0);
+        if (m is null) return "no completed command marks (FTCS wrap not active?)";
+        // Output begins after the command's input row: 133;C if the shell emits it, else the
+        // line after 133;B (the input row), else after the prompt.
+        int from = m.OutputLine >= 0 ? m.OutputLine : m.CommandLine >= 0 ? m.CommandLine + 1 : m.PromptLine + 1;
+        return from > m.EndLine - 1 ? "" : RowsText(pane, from, m.EndLine - 1);
+    }
+
+    public string SessionCopy(string? target) => InvokeOnUi(() =>
+    {
+        var pane = PaneForTarget(target);
+        // On the UI thread: reading a selection RECONCILES it (eviction may have renumbered or
+        // invalidated it), and selection state belongs to this thread.
+        return pane is not null ? SelectionText(pane) : "";
+    });
+
+    // Selection/clipboard control API. Clipboard + selection are UI-thread concepts, so hop on-thread.
+    // No pane for the target is the shared refusal (ISessionHost.RefusePrefix + SessionContexts.NoSession,
+    // ok:false at the server) — it used to be the bare string "no session" under ok:true.
+    public string SelectionAll(string? target) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        SelectAll(p); return HasLiveSel(p) ? "selected all" : "empty";
+    });
+
+    public string SelectionCopy(string? target) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        if (!HasLiveSel(p)) return "no selection";
+        // Report what actually happened: a live selection over cells a TUI has blanked copies
+        // nothing and leaves the clipboard alone, and an agent acting on this reply must not be
+        // told otherwise. Length is not the measure — SelectionText joins rows with CRLF whether
+        // or not a row held text.
+        return CopySelection(p, out string copied) ? $"copied {copied.Length} chars" : "nothing to copy";
+    });
+
+    public string SelectionClear(string? target) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        p.ClearSel(); RequestRedraw(); return "cleared";
+    });
+
+    // Test/observability hook: run the same finalize path a mouse-up runs (honors copy-on-select).
+    public string SelectionFinalize(string? target) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        // Ask the copy what happened rather than inferring it from a surviving selection: since
+        // FinalizeSelection passes clear:false, the selection survives either way, so the
+        // "(empty)" arm was unreachable and a declined copy was reported as a copy.
+        bool copied = FinalizeSelection(p);
+        return _config.CopyOnSelect ? (copied ? "finalized (copied)" : "finalized (empty)") : "finalized (copy-on-select off)";
+    });
+
+    public string SessionPaste(string? target, string? text) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target); if (p is null) return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        // Report what actually happened (the `nothing to copy` idiom above; SessionPastes has the
+        // words): PasteTextInto returns silently for a read-only pane and for empty text, and this
+        // used to answer `pasted` for both. The read-only refusal comes before the clipboard is
+        // touched; the missing-pane refusal above comes before everything.
+        if (p.ReadOnly) return ISessionHost.RefusePrefix + SessionPastes.ReadOnlyPane;
+        // A single-pane session keeps its exited process on screen (OnPaneProcessExited leaves it; a
+        // split pane is closed and the target resolves to nothing). Its input pipe may still take
+        // bytes, so a paste into it would answer `pasted` for text that reached no program (round 9
+        // of #256): refused, before the clipboard is read, like the read-only pane.
+        if (p.S.HasExited) return ISessionHost.RefusePrefix + SessionPastes.ExitedPane;
+        if (p.S.InputClosed) return ISessionHost.RefusePrefix + SessionPastes.InputUnavailable;
+        // "text (or the clipboard when text is null/EMPTY)": the CLI always sends text, "" when the
+        // caller gave none, so `?? ClipboardGet()` never ran and `session paste` pasted nothing.
+        // ClipboardGet answers "" both for a clipboard with no text and for one it could not read.
+        string payload = SessionPastes.Payload(text, ClipboardGet);
+        // The write can throw (a pipe that broke, a session never started); the WM_APP_SYNC handler
+        // would swallow that into ok:true with an empty result, so it is answered as a refusal here.
+        try { if (payload.Length != 0) PasteTextInto(p, payload, interactive: false); }   // scripted: never prompt (agents)
+        catch (Exception ex) { return ISessionHost.RefusePrefix + SessionPastes.Failed(ex.Message); }
+        return SessionPastes.Reply(payload);
+    });
+
+    // Search operates on the active pane's find bar (a UI-thread concept); run it synchronously
+    // on the UI thread and return the "N of M" status. (target is accepted for API shape; v1
+    // searches the active session.)
+    public string SessionSearch(string? target, string? query, string? action) => InvokeOnUi(() =>
+    {
+        if (PaneForTarget(target) is null || ActiveSurface() is null)
+            return ISessionHost.RefusePrefix + SessionContexts.NoSession;
+        if (action == "close") { CloseSearch(); return "closed"; }
+        if (!_searchActive) _searchActive = true;
+        if (!string.IsNullOrEmpty(query)) { _searchQuery = query!; RecomputeSearch(); _searchCur = 0; ScrollToMatch(); }
+        else if (action == "next") SearchStep(1);
+        else if (action == "prev") SearchStep(-1);
+        else { RecomputeSearch(); ScrollToMatch(); }
+        RequestRedraw();
+        return SearchStatus();
+    });
+
+    public bool SessionScratch(string? target, string op)
+        => InvokeOnUiQueued(() => {
+        var ses = FindSesForTarget(target);
+        if (ses is null) return false;
+        ScratchOp(ses, op);
+        return true;
+    });
+
+    public void Quick(string op) => InvokeOnUiQueued(() => { QuickOp(op, control: true); return 0; });
+
+    /// <summary>An overlay covers a whole SESSION. When the caller named one pane of a split, that
+    /// is not what they asked for - say so rather than widen it in silence and blank the pane the
+    /// user was reading. (Found for real: a review TUI aimed at the right pane took the left one
+    /// too, and nothing in the reply said it would.) A pane in a single-pane session is refused
+    /// nothing: there, covering the session covers exactly that pane.</summary>
+    private string? OverlayTargetRefusal(string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return null;
+        var ses = FindSesForTarget(target);
+        if (ses is null || ses.Panes.Count <= 1) return null;   // one pane: covering the session covers it
+        // A string that names the SESSION keeps session behaviour; only a pane id is refused.
+        if (ses.Id == target || ses.Id.StartsWith(target, StringComparison.Ordinal)) return null;
+        if (!ses.Panes.Any(p => p.Id == target || p.Id.StartsWith(target, StringComparison.Ordinal))) return null;
+        return ISessionHost.RefusePrefix +
+               $"'{target}' names one pane of a {ses.Panes.Count}-pane session; session.overlay covers " +
+               $"the whole session. Pass the session id ({ses.Id}) to cover it, or omit --target.";
+    }
+
+    // One wording for "the target names no session", shared by open, resize and a targeted close,
+    // and by FakeSessionHost — the unit suite asserts wording, so the two hosts must not drift.
+    private const string NoSessionRefusal = ISessionHost.RefusePrefix + "no session matches that target; nothing opened, resized or closed";
+
+    public string SessionOverlay(string? target, string action, string? command, int sizePercent, bool wait, bool block,
+        string? pane, OverlayTextArgs text)
+    {
+        // The pane arm (P5): the word is parsed first, so a bad one is refused before any resolve;
+        // a resize or a size with a pane is refused here as well as at the server (one definition,
+        // two guards: a raw client that reached the host would be refused in the same words; the
+        // resize check comes FIRST at every end, since a resize always carries a size and would
+        // otherwise be refused as one, in words that never name the verb the caller typed); the
+        // rest is PaneOverlayAction's, per slot.
+        if (pane is not null)
+        {
+            if (!OverlayPanes.TryParse(pane, out int paneIndex, out string? paneRefusal)) return ISessionHost.RefusePrefix + paneRefusal;
+            if (action == "resize") return ISessionHost.RefusePrefix + OverlayPanes.ResizeWithPaneRefusal;
+            if (sizePercent != 0) return ISessionHost.RefusePrefix + OverlayPanes.SizeWithPaneRefusal;
+            return PaneOverlayAction(target, action, command, wait, block, paneIndex, text);
+        }
+        // A pane overlay's OWN id on --target, --pane omitted, names its slot (the rule: the id reaches
+        // the overlay from anywhere). Before this arm the id passed OverlayTargetRefusal (no pane id
+        // starts with it) and resolved to its SESSION, so `close --target <pane overlay id>` closed the
+        // session-wide slot or answered ok "no overlay" while the program ran on. The two usage
+        // refusals name the id the guard saw; open on a held slot is then "already open", as with the word.
+        if (PaneOverlayIndexOf(target) is >= 0 and var owned)
+        {
+            if (action == "resize") return ISessionHost.RefusePrefix + OverlayPanes.OverlayIdResizeRefusal(target!, owned);
+            if (sizePercent != 0) return ISessionHost.RefusePrefix + OverlayPanes.OverlayIdSizeRefusal(target!, owned);
+            return PaneOverlayAction(target, action, command, wait, block, owned, text, inferred: true);
+        }
+        if (action != "result" && OverlayTargetRefusal(target) is { } refusal) return refusal;
+        switch (action)
+        {
+            case "result":
+                return _lastOverlayExit;
+            case "copy":
+            case "text":
+                // The session-wide slot's reader (P5): resolve and read in ONE queued UI hop, as the
+                // pane arm does, so the slot the reply describes is the slot the session had when the
+                // read ran. No session is the shared "no session" refusal (a read of nothing is not
+                // "no overlay"); an empty slot is the bare `no overlay` — the pane arm names its slot
+                // after the colon. The #213 refusal above still stands for a pane-id target without
+                // --pane: the reply would otherwise silently widen to the session's slot.
+                return InvokeOnUiQueued(() =>
+                {
+                    var ses = FindSesForTarget(target);
+                    if (ses is null) return NoSessionRefusal;
+                    return OverlayRead(ses.Overlay, action, text, OverlayPanes.SessionWide);
+                });
+            case "close":
+                {
+                    // Two states used to share one answer. A SESSION that exists and has no overlay
+                    // is idempotent and deliberately NOT a refusal: the caller wants "no overlay
+                    // open" to be true afterwards, and it is; the conformance contract runs `session
+                    // overlay close` with nothing open (and no --target) and expects ok. A named
+                    // target that resolves to NOTHING is different — a typo'd id, a session that has
+                    // exited — because the overlay the caller meant may still be up, and ok would say
+                    // it is gone. Empty / "active" stays ok even with no active session, so a bare
+                    // close in an empty window is not contract-dependent on a session existing.
+                    var ses = FindSesForTarget(target);
+                    if (ses is null && !string.IsNullOrEmpty(target) && target != "active") return NoSessionRefusal;
+                    if (ses is null || (ses.Overlay.Term is null && ses.Hud is null)) return "no overlay";
+                    PostVerb(() => CloseOverlayOf(ses));
+                    return "closed";
+                }
+            case "resize":
+                {
+                    // No clamp: ControlServer.TryOverlaySize refused anything outside 0..100 before
+                    // this ran, so the N reported is always the N the caller asked for. A clamp here
+                    // could only hide a bug upstream now. 0 = full content region; 1..100 = centered panel.
+                    int sp = sizePercent;
+                    // Resolve, check and write in ONE queued UI action and reply from its result
+                    // (#227): resolved on the pipe thread and written by a posted action, the check
+                    // and the write could straddle the overlay's exit — the exit's close (a posted
+                    // action ahead in the same queue) cleared the slot's SizePercent, the resize then
+                    // wrote N over a session with no overlay, and the tree showed `overlaySize` on
+                    // nothing while the reply said "resized". The refusals are the same as before:
+                    // no session at all is not "open one first" (before P2's review both came back
+                    // as ok:true "no overlay", and a script branching on ok proceeded as if the
+                    // resize had happened).
+                    return InvokeOnUiQueued(() =>
+                    {
+                        var ses = FindSesForTarget(target);
+                        if (ses is null) return NoSessionRefusal;
+                        if (ses.Overlay.Term is null) return ISessionHost.RefusePrefix + "no overlay to resize on that target; open one first";
+                        ses.Overlay.SizePercent = sp;
+                        if (ReferenceEquals(_ovlOwner, ses)) RegridCover();
+                        RequestRedraw();
+                        return $"resized {sp}%";
+                    });
+                }
+            default: // "open"
+                {
+                    // Both refusals (same reason as resize above): nothing was opened. The command
+                    // is checked first, then the session — the fake host checks in the same order.
+                    if (string.IsNullOrWhiteSpace(command)) return ISessionHost.RefusePrefix + "overlay open needs a command; nothing opened";
+                    if (block)
+                    {
+                        // Open on the UI thread, then wait (on this pipe thread) on the completion
+                        // source of THE PANE THIS CALL OPENED (#227): before, every blocking open in
+                        // the window waited on one event and then read one field, so a caller could
+                        // return on another session's exit, read "no overlay" after a later open's
+                        // reset, or stay parked past its own program's exit. The source is taken
+                        // inside the same UI hop as the open, so it is this open's pane and no other.
+                        TaskCompletionSource<string>? done = null;
+                        bool ran = false;
+                        string opened = InvokeOnUi(() =>
+                        {
+                            ran = true;
+                            var s = FindSesForTarget(target);
+                            if (s is null) return NoSessionRefusal;
+                            string id = OverlayOpen(s, null, command!, sizePercent, false);
+                            done = s.Overlay.Term!.OverlayDone;
+                            return id;
+                        });
+                        // InvokeOnUi does not say whether its lambda ran: a SendMessage to a window
+                        // already destroyed returns at once with the PREVIOUS caller's result on this
+                        // window — which may itself be a refusal, so the reply text is no proof of
+                        // anything. `ran` is: unset, the window was gone before the open, the same
+                        // throw as below. Set, the result is this call's own: a refusal is returned as
+                        // one; otherwise `done` is the pane's source, and its absence means OverlayOpen
+                        // threw midway (InvokeOnUi turns a throw into ""), which is not the window
+                        // going away and says so.
+                        if (!ran) throw new InvalidOperationException(OverlayWindowGone);
+                        if (opened.StartsWith(ISessionHost.RefusePrefix, StringComparison.Ordinal)) return opened;
+                        if (done is null) throw new InvalidOperationException("the open did not complete on the UI thread; whether an overlay opened is unknown — read tree");
+                        // The wait ends with the pane's own outcome — "exit N", or "closed" when the
+                        // overlay was closed or replaced before its program exited — or with the
+                        // window going away (Dispose closes each pane without raising Exited, so the
+                        // source would never complete; _uiGone is cancelled on WM_DESTROY's first line).
+                        try { done.Task.Wait(Timeout.Infinite, _uiGone.Token); }
+                        catch (OperationCanceledException) { throw new InvalidOperationException(OverlayWindowGone); }
+                        return done.Task.Result;
+                    }
+                    return InvokeOnUi(() => { var s = FindSesForTarget(target); return s is null ? NoSessionRefusal : OverlayOpen(s, null, command!, sizePercent, wait); });
+                }
+        }
+    }
+
+    private const string OverlayWindowGone = "the window closed before the overlay's program exited; its exit status is unknown";
+
+    /// <summary>The pane arm of <see cref="SessionOverlay"/> (P5): <paramref name="index"/> is the parsed
+    /// <c>--pane</c> word (0 = left, 1 = right, whatever the axis). Every action resolves the session
+    /// AND the pane by index INSIDE its UI hop (InvokeOnUiQueued: the split the session has when the
+    /// verb runs, not the one the pipe thread saw), so a refusal leaves the world untouched and a reply
+    /// describes the slot that existed when it ran. The resolve, in order (<see cref="LocatePaneSlot"/>):
+    /// no session — the shared "no session" refusal, except a bare <c>close</c> (no target / "active")
+    /// which stays ok "no overlay", the session-wide arm's shape; then the AGREEMENT check — a
+    /// <c>--target</c> that is the session id (or a prefix of it, or a name) passes, a pane id (or a
+    /// prefix of one), or a pane's overlay id, must be the same side as <c>--pane</c>
+    /// (<see cref="OverlayPanes.Disagree"/>: the caller named two panes); then <c>pane not visible</c>
+    /// when the index is past the pane count (a single-pane session accepts <c>left</c> only). With
+    /// <paramref name="inferred"/> — no word was passed; <paramref name="index"/> is what the overlay id
+    /// on <c>--target</c> resolved to on the pipe thread — the hop follows THE ID instead (the slot may
+    /// have moved on a swap, or gone, since), so no refusal names a <c>--pane</c> the caller never
+    /// passed: <see cref="OverlayPanes.OverlayIdGoneRefusal"/> when it resolves to no open pane overlay
+    /// any more. Then per action: <c>open</c> — the held-slot
+    /// refusal from <see cref="OverlayOpen"/>, else the overlay pane id; with <c>block</c> the pipe
+    /// thread then waits on THE TERM THIS CALL OPENED (its OverlayDone, taken inside the same hop as
+    /// the open — #227's rule for the session-wide arm), released by its exit ("exit N"), by a close
+    /// ("closed") or by the window going (a throw, the status unknown); <c>close</c> — "closed", or
+    /// ok "no overlay" with the slot empty; <c>result</c> — the slot's own last result: refused
+    /// <see cref="OverlayPanes.StillRunning"/> while a program is up in it, <see cref="OverlayPanes.NoResult"/>
+    /// while nothing has exited in it since the window opened (or since its last open), else "exit N";
+    /// <c>copy</c> / <c>text</c> — <see cref="OverlayRead"/> on the slot. An action this arm does not
+    /// know opens, as the session-wide arm's default does (and the fake's).</summary>
+    private string PaneOverlayAction(string? target, string action, string? command, bool wait, bool block, int index, OverlayTextArgs text, bool inferred = false)
+    {
+        switch (action)
+        {
+            case "close":
+                return InvokeOnUiQueued(() =>
+                {
+                    var (s, p, early) = LocatePaneSlot(target, index, bareCloseOk: true, inferred: inferred);
+                    if (early is not null) return early;
+                    if (p!.Overlay.Term is null) return OverlayPanes.NoOverlay;
+                    ClosePaneOverlay(s!, p);
+                    return "closed";
+                });
+            case "result":
+                return InvokeOnUiQueued(() =>
+                {
+                    var (_, p, early) = LocatePaneSlot(target, index, inferred: inferred);
+                    if (early is not null) return early;
+                    var slot = p!.Overlay;
+                    // Under the exit lock the two fields are one state: an open resets LastResult and
+                    // assigns Term in one locked step, an exit writes LastResult while Term is still that
+                    // term. So "running" is a term in the slot whose program has not written its exit —
+                    // true whether or not the close after a non-wait exit has run yet, and false the
+                    // moment a --wait program exits (the banner is up, the result is readable).
+                    lock (_overlayExitLock)
+                    {
+                        if (slot.Term is not null && slot.LastResult == OverlayPanes.NoResult) return ISessionHost.RefusePrefix + OverlayPanes.StillRunning;
+                        if (slot.LastResult == OverlayPanes.NoResult) return ISessionHost.RefusePrefix + OverlayPanes.NoResult;
+                        return slot.LastResult;
+                    }
+                });
+            case "copy":
+            case "text":
+                return InvokeOnUiQueued(() =>
+                {
+                    var (_, p, early) = LocatePaneSlot(target, index, inferred: inferred);
+                    if (early is not null) return early;
+                    return OverlayRead(p!.Overlay, action, text, index);
+                });
+            default: // "open"
+                {
+                    if (string.IsNullOrWhiteSpace(command)) return ISessionHost.RefusePrefix + "overlay open needs a command; nothing opened";
+                    if (!block)
+                        return InvokeOnUiQueued(() =>
+                        {
+                            var (s, p, early) = LocatePaneSlot(target, index, inferred: inferred);
+                            if (early is not null) return early;
+                            return OverlayOpen(s!, p!, command!, 0, wait);
+                        });
+                    // The source is taken inside the same hop as the open, off the slot this call filled,
+                    // so the wait ends with THIS term's outcome and no other (#227). InvokeOnUiQueued
+                    // throws when the hop cannot run (the window gone, the queue full, a timeout), so a
+                    // reply here is this call's own: a refusal is returned as one; otherwise `done` is
+                    // the term's source, and its absence means OverlayOpen returned an id without a term
+                    // in the slot, which is a bug and says so rather than waiting on nothing.
+                    TaskCompletionSource<string>? done = null;
+                    string opened = InvokeOnUiQueued(() =>
+                    {
+                        var (s, p, early) = LocatePaneSlot(target, index, inferred: inferred);
+                        if (early is not null) return early;
+                        string id = OverlayOpen(s!, p!, command!, 0, false);
+                        if (!id.StartsWith(ISessionHost.RefusePrefix, StringComparison.Ordinal)) done = p!.Overlay.Term?.OverlayDone;
+                        return id;
+                    });
+                    if (opened.StartsWith(ISessionHost.RefusePrefix, StringComparison.Ordinal)) return opened;
+                    if (done is null) throw new InvalidOperationException("the open did not complete on the UI thread; whether an overlay opened is unknown — read tree");
+                    try { done.Task.Wait(Timeout.Infinite, _uiGone.Token); }
+                    catch (OperationCanceledException) { throw new InvalidOperationException(OverlayWindowGone); }
+                    return done.Task.Result;
+                }
+        }
+    }
+
+    /// <summary>The pane arm's resolve, on the UI thread (see <see cref="PaneOverlayAction"/> for the
+    /// order). Returns the session and the pane at <paramref name="index"/>, or an <c>early</c> reply
+    /// in their place: a refusal (prefixed), or — with <paramref name="bareCloseOk"/> and no session
+    /// for an absent / "active" target — the plain ok "no overlay" a bare close answers. The session id is
+    /// checked BEFORE the pane ids because one pane carries it (a <c>session new</c> mints pane 0 = the
+    /// session id; after a swap that pane sits in slot 1): a target equal to it is the session, and agrees
+    /// with either word — only a pane with its OWN id, or with its overlay's id, can disagree. With
+    /// <paramref name="inferred"/> (see <see cref="PaneOverlayAction"/>) there is no word to agree with:
+    /// the target IS a pane overlay's id, and the pane whose open overlay carries it now is the answer —
+    /// <paramref name="index"/> is only what it was on the pipe thread — or, when none does any more,
+    /// <see cref="OverlayPanes.OverlayIdGoneRefusal"/>.</summary>
+    private (Ses? s, Pane? p, string? early) LocatePaneSlot(string? target, int index, bool bareCloseOk = false, bool inferred = false)
+    {
+        bool named = !string.IsNullOrEmpty(target) && target != "active";
+        var s = FindSesForTarget(target);
+        if (inferred)
+        {
+            if (s is not null)
+                for (int i = 0; i < s.Panes.Count; i++)
+                    if (s.Panes[i].Overlay.Term is { } po && (po.Id == target || po.Id.StartsWith(target!, StringComparison.Ordinal)))
+                        return (s, s.Panes[i], null);
+            return (s, null, ISessionHost.RefusePrefix + OverlayPanes.OverlayIdGoneRefusal(target!));
+        }
+        if (s is null) return (null, null, bareCloseOk && !named ? OverlayPanes.NoOverlay : NoSessionRefusal);
+        if (named && !(s.Id == target || s.Id.StartsWith(target!, StringComparison.Ordinal)))
+            for (int i = 0; i < s.Panes.Count; i++)
+            {
+                // The pane's id, then its overlay's own id (which starts with the pane's, so a prefix
+                // of the pane id matched above; a longer prefix, or the whole id, lands here): either
+                // on the other side than --pane is the caller naming two panes.
+                if ((s.Panes[i].Id == target || s.Panes[i].Id.StartsWith(target!, StringComparison.Ordinal)) && i != index)
+                    return (s, null, ISessionHost.RefusePrefix + OverlayPanes.Disagree(target!, i, index));
+                if (s.Panes[i].Overlay.Term is { } po && (po.Id == target || po.Id.StartsWith(target!, StringComparison.Ordinal)) && i != index)
+                    return (s, null, ISessionHost.RefusePrefix + OverlayPanes.Disagree(target!, i, index, overlay: true));
+            }
+        if (index >= s.Panes.Count) return (s, null, ISessionHost.RefusePrefix + OverlayPanes.NotVisibleRefusal(s.Id));
+        return (s, s.Panes[index], null);
+    }
+
+    /// <summary>The pane whose OPEN overlay <paramref name="target"/> names (its id, or a prefix of it
+    /// longer than the pane's own id — FindControlPane's arms), as an index into its session's panes;
+    /// -1 for anything else (absent, "active", a session, a pane, a session-wide cover, a scratch, the
+    /// quick terminal, nothing). Read under the workspace lock on the caller's thread — a first
+    /// answer only: the hop re-resolves the ID through LocatePaneSlot (<c>inferred</c>), which follows
+    /// the slot wherever a swap moved it meanwhile, and refuses naming the id when it is gone.</summary>
+    private int PaneOverlayIndexOf(string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return -1;
+        if (FindControlPane(target) is not { cover: true, ses: { } s } hit) return -1;
+        lock (_workspaces)
+            for (int i = 0; i < s.Panes.Count; i++)
+                if (ReferenceEquals(s.Panes[i].Overlay.Term, hit.pane)) return i;
+        return -1;
+    }
+
+    /// <summary><c>copy</c> / <c>text</c> on one slot, either kind, on the UI thread (a selection is
+    /// reconciled when read, and selection state belongs to this thread — as SessionCopy). An empty
+    /// slot is <see cref="OverlayPanes.NoOverlayRefusal"/> for <paramref name="index"/> (the bare
+    /// phrase for the session-wide slot). <c>copy</c> is the overlay term's OWN selection through
+    /// <see cref="SelectionText"/> — read-only, the clipboard untouched (CopySelection is not called);
+    /// no live selection is <see cref="OverlayPanes.NoSelection"/>. <c>text</c> is the term's buffer
+    /// through <see cref="SurfaceText.Dump"/>, the one reader <c>session text</c> uses; a throw from the
+    /// walk is <see cref="OverlayPanes.ReadFailed"/> with the message. <see cref="OverlayPanes.NotRealized"/>
+    /// is agterm's phrase for a slot whose terminal is not up yet; CreatePane builds the emulator
+    /// synchronously, so no slot here holds a term without one, and the phrase is not emitted.</summary>
+    private static string OverlayRead(OverlaySlot slot, string action, OverlayTextArgs text, int index)
+    {
+        var term = slot.Term;
+        if (term is null) return ISessionHost.RefusePrefix + OverlayPanes.NoOverlayRefusal(index);
+        if (action == "copy")
+        {
+            if (!HasLiveSel(term)) return ISessionHost.RefusePrefix + OverlayPanes.NoSelection;
+            return SelectionText(term);
+        }
+        try { return SurfaceText.Dump(term.S, text); }
+        catch (Exception e) { return ISessionHost.RefusePrefix + OverlayPanes.ReadFailedRefusal(e.Message); }
+    }
+
+    public bool Notify(string? target, string? title, string body, NotificationCategory category)
+    {
+        var ses = FindSesForTarget(target);
+        if (ses is null) return false;
+        PostVerb(() => OnNotified(ses.ActivePane, title ?? "", body, category));
+        return true;
+    }
+
+    public bool SessionFlag(string? target, string op)
+    {
+        if (op == "clear") { PostVerb(() => FlagOp(null, "clear")); return true; } // clear is global; no target needed
+        var ses = FindSesForTarget(target);
+        if (ses is null) return false;
+        PostVerb(() => FlagOp(ses, op));
+        return true;
+    }
+
+    // Bind (or clear) a resumable agent on a specific pane, keyed by the pane id the caller used as
+    // its WAGTERM_SESSION_ID. Persisted so restart re-launches the agent (which resumes itself).
+    public bool SessionBind(string? target, string agent)
+    {
+        if (string.IsNullOrEmpty(target)) return false;
+        var hit = FindPaneById(target!);
+        if (hit is null) return false;
+        string? val = SessionOperations.Binding(agent);
+        Interlocked.Increment(ref hit.Value.pane.BindSeq);   // supersedes a SessionStart binding still resolving
+        PostVerb(() => { hit.Value.pane.AgentResume = val; SaveState(); });
+        return true;
+    }
+
+    // SessionStart binding (#316). The Toolhelp walk from the hook's PID runs here, before the reply,
+    // because the hook exits as soon as it is answered. The command lines (a CIM query, ~1 s) are read
+    // after it, off the pipe thread: the agent and the shell outlive the hook. The outcome, bound or
+    // ignored with the reason, is a `bind` event.
+    public bool SessionBindResume(string? target, string agent, string sessionId, string? cwd, int hookPid)
+    {
+        if (string.IsNullOrEmpty(target)) return false;
+        var hit = FindPaneById(target!);
+        if (hit is null) return false;
+        var pane = hit.Value.pane;
+        int seq = Interlocked.Increment(ref pane.BindSeq);
+        var chain = SnapshotAncestry(hookPid);
+        int? shellPid = pane.S.ChildProcessId;
+        var shell = Wagterm.Pty.AgentResume.ClassifyShell(ResolveProfile(hit.Value.ses?.ProfileName)?.Command ?? "powershell.exe");
+        _ = Task.Run(() =>
+        {
+            string outcome;
+            try
+            {
+                if (chain is null || shellPid is not int sp) outcome = "ignored: the process tree could not be read";
+                else
+                {
+                    var lines = QueryCommandLines(chain.Select(r => r.Pid), timeoutMs: 15000);
+                    var procs = chain.ToDictionary(r => r.Pid, r => r with { CommandLine = lines.GetValueOrDefault(r.Pid, "") });
+                    string? cmdline = Wagterm.Pty.AgentResume.FindAgentCommandLine(procs, hookPid, sp, agent, out string? why);
+                    if (cmdline is null)
+                        outcome = $"ignored: {why} (walked {string.Join(" <- ", chain.Select(r => $"{r.Name}:{r.Pid}"))})";
+                    else
+                    {
+                        string relaunch = Wagterm.Pty.AgentResume.Compose(shell, agent, sessionId, cwd,
+                            Wagterm.Pty.AgentResume.ResumeFlags(agent, cmdline));
+                        Post(() =>
+                        {
+                            if (Volatile.Read(ref pane.BindSeq) != seq) return;   // a later bind won
+                            pane.AgentResume = relaunch;
+                            SaveState();
+                        });
+                        outcome = "bound: " + relaunch;
+                    }
+                }
+            }
+            catch (Exception ex) { outcome = "ignored: " + ex.Message; }
+            EmitEvent("bind", pane.Id, outcome);
+        });
+        return true;
+    }
+
+    // Pin (or clear, command = null) a restore command on a specific pane (agterm #271). Persisted so
+    // restart always re-runs it. Resolves through FindControlPane, the path every other content verb
+    // uses (exact pane, exact session, pane prefix, session prefix/name) rather than the FindPaneById
+    // it used before P2. While the pane carrying the session id still exists the two agree for every
+    // target the old resolver accepted: exactly one pane carries its session's id (pane 0 until a
+    // session.swap moves it — P4; a restore keeps the order it saved), so the exact-session step only
+    // repeats the exact-pane hit, and the
+    // prefix step is the same predicate in the same order. Two things changed. A
+    // session NAME now reaches that session's focused pane instead of being refused. And once NO pane
+    // carries the session id — the carrier was closed, however it was closed (ISessionHost.SplitClose
+    // states the rule by condition; split panes get fresh ids, so nothing re-mints it until the session
+    // is closed and reopened, which puts the id back on pane 0), a session id
+    // or id-prefix that the old resolver either refused or steered onto a scratch/overlay cover pane
+    // ("<id>:scratch:…" matched the prefix step) now resolves to the session's active pane — the
+    // better answer in both cases. The empty / "active" refusal and the
+    // ""/"none" folding live in ControlServer, where the fake host can exercise them.
+    //
+    // Resolve, validate, write and save happen in ONE UI-thread hop, and that hop travels the
+    // POSTED queue (InvokeOnUiQueued), not SendMessage: resolved on the pipe thread and written in a
+    // later Post, the pane could exit or be closed by another client in between, the removal would
+    // run first, the write would land on a detached pane, SaveState would serialise no pin — and
+    // the caller would already hold a structured "pinned" naming that pane. A SendMessage hop
+    // (InvokeOnUi) closes most of that window but not all of it: Windows dispatches a sent message
+    // AHEAD of messages already posted, so a pane-exit removal that is queued but not yet run would
+    // still be overtaken (revmux r2 of P2). FIFO with the removals is the only ordering that makes
+    // the resolve inside the hop the truth. Returns the pane the pin landed on, so the reply can
+    // name it; null = nothing matched, and nothing was pinned.
+    public RestorePinTarget? SessionRestore(string target, string? command)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return null;
+        return InvokeOnUiQueued<RestorePinTarget?>(() =>
+        {
+            var hit = FindControlPane(target);
+            if (hit is null) return null;
+            // A scratch / overlay / quick cover is not in the saved tree, so a pin on one would answer
+            // ok and then vanish at the next restart — the exact "succeeded, did nothing" this batch
+            // exists to end. Refuse it with the pane named, and pin nothing.
+            if (hit.Value.cover)
+                return new RestorePinTarget(hit.Value.pane.Id, hit.Value.ses?.Id ?? hit.Value.pane.Id,
+                    Refusal: $"'{hit.Value.pane.Id}' is a scratch/overlay/quick pane, which is never restored; a pin there would be lost at the next restart. Nothing pinned.");
+            hit.Value.pane.RestoreCommand = command;
+            SaveState();
+            return new RestorePinTarget(hit.Value.pane.Id, hit.Value.ses!.Id);
+        });
+    }
+
+    // restore.capture (P3): capture every real pane's foreground command (or one pane's) into its
+    // durable slot NOW, and say per pane what was captured. Three steps on two threads:
+    //   1. PIPE THREAD: resolve the target and snapshot (pane, session, shell pid) under the
+    //      workspaces lock, the way Tree() reads. An unknown target or a cover is refused here,
+    //      before any process is queried — a refusal at this step captures nothing for anyone (the
+    //      one refusal that does leave slots behind is step 3's NotSaved, below).
+    //   2. PIPE THREAD: the CIM query, with the 15 s timeout the non-quit callers use (a cold CIM
+    //      start can exceed 4 s). RestartAllClaudeSessions is the precedent; AdoptClaudeSessions,
+    //      which blocks the UI thread on it through InvokeOnUi, is the one not to copy — a verb that
+    //      freezes the window for seconds is P2's defect class one layer down. The pipe thread
+    //      belongs to the caller who asked, so it is the right thread to wait on. A query that did
+    //      not run is a refusal, never "nothing running" written into every slot.
+    //   3. ONE FIFO queued hop (InvokeOnUiQueued, never InvokeOnUi): every CapturedCommand write plus
+    //      one SaveState, so the reply describes a state that exists on disk. A hop that cannot be
+    //      queued, or that the window closes under, throws — ok:false, nothing written, nothing
+    //      saved. A hop that times out is ok:false with the action still queued: it may land when
+    //      the loop resumes, and the reply says so rather than claiming nothing was written.
+    //      A pane closed between the snapshot and the hop (its removal is ahead of us in the same
+    //      queue) is dropped from the reply rather than written to.
+    // The restore-commands toggle gates the REPLAY, not the capture — reported as replayOnRestore.
+    public RestoreCaptureResult RestoreCapture(string? target)
+    {
+        var snap = new List<(Pane pane, Ses ses, int pid)>();
+        if (string.IsNullOrEmpty(target))
+        {
+            lock (_workspaces)
+                foreach (var s in _workspaces.SelectMany(w => w.Sessions))
+                    foreach (var p in s.Panes) snap.Add((p, s, p.S.ChildProcessId ?? 0));
+        }
+        else if (target == "active")
+        {
+            Ses? a = _active;
+            if (a is null) return RestoreCaptureResult.Refuse(RestoreCaptureReply.UnknownTarget(target));
+            lock (_workspaces) { var p = a.ActivePane; snap.Add((p, a, p.S.ChildProcessId ?? 0)); }
+        }
+        else
+        {
+            var hit = FindControlPane(target);   // session.restore's resolver: exact pane, exact session, pane prefix, session prefix / name
+            if (hit is null) return RestoreCaptureResult.Refuse(RestoreCaptureReply.UnknownTarget(target));
+            if (hit.Value.cover || hit.Value.ses is null) return RestoreCaptureResult.Refuse(RestoreCaptureReply.CoverPane(hit.Value.pane.Id));
+            snap.Add((hit.Value.pane, hit.Value.ses, hit.Value.pane.S.ChildProcessId ?? 0));
+        }
+
+        if (!TryCaptureForegroundCommands(snap.Select(x => x.pid).Where(pid => pid > 0), timeoutMs: 15000, out var byPid))
+            return RestoreCaptureResult.Refuse(RestoreCaptureReply.QueryFailed);
+
+        var (result, json, stamp, landedCount) = InvokeOnUiQueued(() =>
+        {
+            var landed = new List<CapturedPane>(snap.Count);
+            lock (_workspaces)
+                foreach (var (pane, ses, pid) in snap)
+                {
+                    if (!_workspaces.Contains(ses.Ws) || !ses.Ws.Sessions.Contains(ses) || !ses.Panes.Contains(pane)) continue;   // closed since the snapshot
+                    pane.CapturedCommand = pid > 0 && byPid.TryGetValue(pid, out var cmd) ? cmd : null;
+                    landed.Add(new CapturedPane(pane.Id, ses.Id, pane.CapturedCommand));
+                }
+            // The snapshot is built here, on the UI thread, where the tree is, and STAMPED here, so
+            // its place in the order is this moment; it is written below, on the pipe thread, so the
+            // window never waits on the file (#294). A save the UI thread queues between the two is
+            // newer and wins, whichever lands first.
+            string? snapshot = null; long reserved = 0;
+            if (landed.Count > 0)
+            {
+                reserved = _stateWriter.Reserve();
+                if ((snapshot = BuildStateSnapshot(out string? buildWhy)) is null)
+                    return (RestoreCaptureResult.Refuse(RestoreCaptureReply.NotSaved(landed.Count, buildWhy)), (string?)null, 0L, landed.Count);
+                SaveIndex();
+            }
+            return (new RestoreCaptureResult(landed, _config.RestoreCommands), snapshot, reserved, landed.Count);
+        });
+        // The reply claims a checkpoint ON DISK. A save that did not land is a refusal that says
+        // what did happen: the slots are in memory (tree shows them) and are left as captured —
+        // rolling them back would make the tree disagree with a query that read the processes
+        // correctly (#246; lite's restore.capture refuses the same way).
+        if (json is not null && !PublishState(json, stamp, out string? why))
+            return RestoreCaptureResult.Refuse(RestoreCaptureReply.NotSaved(landedCount, why));
+        return result;
+    }
+
+    // ---- Control-API event bus (agterm #273): a bounded, cursor-polled log of status / notification /
+    // session-lifecycle / tree-change events. Poll with `events --since <cursor>`; the reply carries the
+    // new max cursor. Instance-scoped (this window). Emitted from any thread; polled from the pipe. ----
+    private readonly object _evtLock = new();
+    private readonly Queue<(long Seq, string Type, string? Session, string? Info)> _evtLog = new();
+    private long _evtSeq;
+
+    internal void EmitEvent(string type, string? session = null, string? info = null)
+    {
+        lock (_evtLock)
+        {
+            _evtLog.Enqueue((++_evtSeq, type, session, info));
+            while (_evtLog.Count > 1000) _evtLog.Dequeue();   // bounded history
+        }
+    }
+
+    public string Events(long since, int limit)
+    {
+        (long Seq, string Type, string? Session, string? Info)[] items;
+        long cursor;
+        lock (_evtLock)
+        {
+            cursor = _evtSeq;
+            var q = _evtLog.Where(e => e.Seq > since);
+            if (limit > 0) q = q.Take(limit);
+            items = q.ToArray();
+        }
+        var sb = new System.Text.StringBuilder();
+        sb.Append("{\"cursor\":").Append(cursor).Append(",\"events\":[");
+        for (int i = 0; i < items.Length; i++)
+        {
+            if (i > 0) sb.Append(',');
+            var e = items[i];
+            sb.Append("{\"seq\":").Append(e.Seq)
+              .Append(",\"type\":").Append(System.Text.Json.JsonSerializer.Serialize(e.Type));
+            if (e.Session is not null) sb.Append(",\"session\":").Append(System.Text.Json.JsonSerializer.Serialize(e.Session));
+            if (e.Info is not null) sb.Append(",\"info\":").Append(System.Text.Json.JsonSerializer.Serialize(e.Info));
+            sb.Append('}');
+        }
+        sb.Append("]}");
+        return sb.ToString();
+    }
+
+    public string AdoptClaude() => InvokeOnUi(() => AdoptClaudeSessions());
+
+    public string RestartClaudeYolo(string? target) => InvokeOnUi(() =>
+    {
+        var p = PaneForTarget(target) ?? ActiveSurface();
+        return p is null ? "no pane" : RestartClaudeYolo(p);
+    });
+
+    public string UpdateClaude() => InvokeOnUi(() => UpdateClaudeCode());
+
+    public string UpdateApp() => InvokeOnUi(() => UpdateWagterm());
+
+    public string SessionBackground(string? target, string action, string? path, int opacity, string? mode) => InvokeOnUi(() =>
+    {
+        var ses = FindSesForTarget(target);
+        if (ses is null) return "no session";
+        if (action == "clear") { ClearBackground(ses); return "cleared"; }
+        if (string.IsNullOrWhiteSpace(path)) return "background set needs a path";
+        return SetBackground(ses, path!, opacity, mode);
+    });
+
+    public void WorkspaceFocus(string op) => PostVerb(() => WorkspaceFocusOp(op));
+
+    public SessionSwitchReply SessionSwitch(string op) => InvokeOnUiQueued(() => SwitchOp(op));
+
+    public string CommandRun(string nameOrCommand, string? mode) => InvokeOnUiQueued(() =>
+    {
+        var cmd = _commands.FirstOrDefault(c => string.Equals(c.Label, nameOrCommand, StringComparison.OrdinalIgnoreCase));
+        string text = cmd?.Text ?? nameOrCommand;
+        // A configured command uses its mode unless overridden; a raw command defaults to a new session.
+        string useMode = mode ?? cmd?.Mode ?? "new";
+        string expanded = RunCommandText(text, useMode);
+        if (expanded.StartsWith(ISessionHost.RefusePrefix, StringComparison.Ordinal)) return expanded;
+        return $"{useMode}: {expanded}";
+    });
+
+    public string CommandList() => InvokeOnUi(CommandListText);
+
+    public string CommandLeader(string op) => InvokeOnUi(() => LeaderOp(op));
+
+    /// <summary>Resolve a control target to a pane using the shared exact-pane, exact-session,
+    /// pane-prefix, session-prefix/name ordering.</summary>
+    private Pane? PaneForTarget(string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return ActiveSurface();
+        return FindControlPane(target)?.pane;
+    }
+
+    /// <summary>Resolve a control-API target ("active"/null/session or pane id/prefix) to its owning session.</summary>
+    private Ses? FindSesForTarget(string? target)
+    {
+        if (string.IsNullOrEmpty(target) || target == "active") return _active;
+        return FindControlPane(target)?.ses;
+    }
+}

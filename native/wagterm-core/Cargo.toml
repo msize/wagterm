@@ -1,0 +1,12 @@
+[package]
+name = "wagterm-core"
+version = "0.1.0"
+edition = "2024"
+description = "wagterm terminal emulator core (VT parser + screen model) — Rust port of Wagterm.Core, consumed from C# over a C ABI"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# (release profile lives in the workspace root Cargo.toml)

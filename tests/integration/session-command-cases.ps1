@@ -18,7 +18,7 @@ function CommandNew($args_){
 }
 try{
     $file=Join-Path $commandArtifact 'remove me.txt';'owned fixture'|Set-Content -LiteralPath $file
-    $command="Remove-Item -LiteralPath './remove me.txt'; Write-Output ('CMD-'+'READY'); Write-Output ('CWD='+ (Get-Location).Path); Write-Output ('PANE='+`$env:AGWINTERM_SESSION_ID); Write-Output 'quoted `"value`" ☃'"
+    $command="Remove-Item -LiteralPath './remove me.txt'; Write-Output ('CMD-'+'READY'); Write-Output ('CWD='+ (Get-Location).Path); Write-Output ('PANE='+`$env:WAGTERM_SESSION_ID); Write-Output 'quoted `"value`" ☃'"
     $id=CommandNew @{command=$command;name='command-default'}
     CommandCheck (CommandWait $id 'CMD-READY') 'default executes PowerShell cmdlet and statements'
     CommandCheck (-not (Test-Path -LiteralPath $file)) 'cmdlet uses the requested working directory'
@@ -67,7 +67,7 @@ class ArgvHelper {
         CommandCheck (CommandWait $argvPane ("ARG${argIndex}="+$encodedArg+':END')) "direct host preserves exact argument $argIndex"
     }
 
-    $failedPane=CommandNew @{command='agwinterm-command-fixture-missing.exe';'command-mode'='direct';name='command-failure';'workspace-name'='command-failure-workspace';'create-workspace'=$true}
+    $failedPane=CommandNew @{command='wagterm-command-fixture-missing.exe';'command-mode'='direct';name='command-failure';'workspace-name'='command-failure-workspace';'create-workspace'=$true}
     CommandCheck (CommandWait $failedPane 'start') 'failed executable retains a diagnostic pane'
     CommandCheck (-not (CommandRpc 'session.type' @{text='MUST-NOT-RUN'} $failedPane -AllowError).ok) 'failed executable has no interpreter accepting input'
     $failedTree=CommandRpc 'tree' @{} ''

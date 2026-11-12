@@ -8,7 +8,7 @@ checks do not require Sandbox.
 Both modes use the standard Release outputs. From the repository root, build first:
 
 ```powershell
-dotnet build Agwinterm.slnx -c Release
+dotnet build Wagterm.slnx -c Release
 ```
 
 ## Direct Windows desktop
@@ -22,7 +22,7 @@ interacting with test windows during the run. Private instance data and control
 pipes do not isolate the tests from desktop input events.
 
 If the maintainer's suite-token helper is installed, supply `-TokenOwner` or set
-`AGWINTERM_TEST_OWNER`. Without that helper, the runner requires `CI=true`; set it
+`WAGTERM_TEST_OWNER`. Without that helper, the runner requires `CI=true`; set it
 only in a child test process so the current shell environment is unchanged:
 
 ```powershell
@@ -39,7 +39,7 @@ cursor inside the guest. Application behavior and CI execution are unchanged.
 ### Requirements
 
 - Windows x64 with Windows Sandbox enabled, and PowerShell 7 x64.
-- Built Windows application and `agwintermctl`, including their output-directory
+- Built Windows application and `wagtermctl`, including their output-directory
   dependencies. Self-contained builds work without an installed .NET runtime.
   For framework-dependent builds, the host needs the corresponding Windows .NET
   runtime; its `host` and `shared` directories are copied, without the SDK.
@@ -65,8 +65,8 @@ pwsh -NoProfile -File tests/integration/sandbox-ui.ps1 -Suite Navigation
 ```
 
 The default paths match the solution's build outputs: the app under
-`src/Agwinterm.Win32/bin/x64/Release/net10.0-windows/win-x64/` and the CLI under
-`src/Agwinterm.Ctl/bin/Release/net10.0-windows/`. No manual staging into
+`src/Wagterm.Win32/bin/x64/Release/net10.0-windows/win-x64/` and the CLI under
+`src/Wagterm.Ctl/bin/Release/net10.0-windows/`. No manual staging into
 `artifacts/local/` is needed. Pass both `-Exe` and `-CtlExe` for a packaged build
 or other output directories; the runner does not search old artifact directories.
 `-PowerShellHome` and `-DotnetHome` override the host dependency locations.

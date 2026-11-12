@@ -1,0 +1,1527 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using Wagterm.Core;
+using Wagterm.Pty;
+using SharpGen.Runtime;
+using Vortice.Direct2D1;
+using Vortice.DirectWrite;
+using Vortice.DCommon;
+using Vortice.Mathematics;
+using static Wagterm.Win32.Win32;
+using Color = Wagterm.Core.Color;
+
+namespace Wagterm.Win32;
+
+/// <summary>
+/// Native Win32 + Direct2D shell for wagterm. We own the window procedure and the
+/// message pump — keyboard input arrives via WM_KEYDOWN/WM_CHAR and goes straight to
+/// the PTY, with no framework focus model in the way. Rendering mirrors the WinUI
+/// OnDraw path but on an ID2D1HwndRenderTarget.
+/// </summary>
+internal partial class Program : ISessionHost, IWindowHost
+{
+    private const float PadX = 8f;
+    private const float PadY = 6f;
+
+    // ---- per-monitor DPI ------------------------------------------------------------------------
+    // The process is PER_MONITOR_AWARE_V2, which tells Windows NOT to scale us — so everything below
+    // is ours to do. It was not done: the render target was pinned at 96 DPI and every metric in the
+    // chrome is a pixel literal, so on a 150% laptop panel the whole UI drew at two thirds of its
+    // intended physical size, and unplugging an external monitor changed nothing at all.
+    //
+    // Rather than scale ~350 layout literals by hand, the render target now carries the REAL DPI.
+    // Direct2D then treats every coordinate we pass as a DIP and scales it for us, so the existing
+    // literals become correct at any scaling — including the font, whose size is already a DIP.
+    //
+    // The boundary that remains is input: mouse coordinates arrive from Windows in DEVICE pixels and
+    // are compared against DIP layout, so they are converted on the way in (DipX/DipY). Getting that
+    // wrong does not look like a DPI bug — it looks like clicks landing in the wrong place.
+    private float _dpi = 96f;
+    private float Scale => _dpi / 96f;
+
+    /// <summary>Client mouse X from an lParam, in DIPs (Windows gives device pixels).</summary>
+    private int DipX(IntPtr lParam) => (int)MathF.Round(LoWord(lParam) / Scale);
+    /// <summary>Client mouse Y from an lParam, in DIPs.</summary>
+    private int DipY(IntPtr lParam) => (int)MathF.Round(HiWord(lParam) / Scale);
+    /// <summary>A device-pixel length (client rect, screen coords) in DIPs.</summary>
+    private int ToDip(int devicePx) => (int)MathF.Round(devicePx / Scale);
+    /// <summary>A DIP length in device pixels, for what Win32 places and sizes itself (child windows, GDI fonts).</summary>
+    private int ToDevice(float dip) => (int)MathF.Round(dip * Scale);
+    private const string ClassName = "WagtermWin32";
+
+    // Kept alive for the lifetime of the process so the GC never collects the thunk.
+    private static WndProc _wndProc = null!;
+
+    // Per-window instance routing. WindowProc is a static trampoline that resolves the owning
+    // Program instance by HWND and dispatches to its instance handler. Frontmost is the instance
+    // un-scoped control verbs act on (single window today; the seam for future --window targeting).
+    private static readonly Dictionary<IntPtr, Program> _registry = new();
+    private static Program? _creating;   // instance whose window is mid-CreateWindowExW (pre-registry)
+    internal static Program Frontmost = null!;
+
+    // ---- Multi-window (Wave F1b): each open window is one Program instance with its own tree.
+    // The WindowLibrary is the app-scope index (all windows, open + closed) + the frontmost id.
+    private static IntPtr _hInstance;
+    private sealed class WinMeta
+    {
+        public string Id { get; set; } = "";
+        public string Name { get; set; } = "";
+        public bool IsOpen { get; set; }
+        public int X { get; set; }
+        public int Y { get; set; }
+        public int W { get; set; }
+        public int H { get; set; }
+        public bool Max { get; set; }
+    }
+    private sealed class WindowsIndexFile
+    {
+        public int Version { get; set; } = 1;
+        public string? Frontmost { get; set; }
+        public List<WinMeta> Windows { get; set; } = new();
+    }
+    private static readonly List<WinMeta> _windowIndex = new();      // guarded by lock(_windowIndex)
+    private static readonly Dictionary<string, Program> _byId = new();
+    private static string? _frontmostId;
+
+    internal string Id { get; set; } = Guid.NewGuid().ToString();    // this window's stable id
+    internal string WinName { get; set; } = "";                      // this window's custom name (shows in the title)
+
+    private IntPtr _hwnd;
+    private static ID2D1Factory _d2d = null!;
+    private static IDWriteFactory _dwrite = null!;
+    private static IDWriteTextFormat _format = null!;
+    private ID2D1HwndRenderTarget? _rt;
+    private ID2D1SolidColorBrush? _brush;
+
+    private static TerminalConfig _config = new();
+    private static Theme _theme = Theme.Default;                 // active colour theme (renderer resolves through it)
+    private static Theme? _themeBeforePreview;                   // saved when the theme picker opens (Esc reverts)
+    private static List<Theme> _allThemes = new();
+    private static Wagterm.Pty.ShellProfiles.Config _profileCfg = new();   // shell profiles (profiles.json); app-global
+    private ISession? _session;   // mirrors the ACTIVE SURFACE (active pane, or a shown cover)
+    // Auxiliary "cover" terminal drawn over the content region: scratch (per-session) or quick (per-app).
+    private Pane? _cover;                // the shown cover, or null
+    private int _coverKind;              // 0 none, 1 scratch, 2 quick, 3 overlay
+    private Pane? _quick;                // the single per-app quick terminal (lazy; kept alive)
+    // Overlays (Wave B3): an ephemeral program run over a session; vanishes when the program exits.
+    private Ses? _ovlOwner;              // the session whose overlay is the current cover (kind 3)
+    private string _lastOverlayExit = "no overlay"; // "exit N" once an overlay's program has exited (`overlay result`, one per window)
+    private readonly object _overlayExitLock = new(); // orders an exit's write of _lastOverlayExit against an open's reset (see WatchOverlayExit)
+    private static ControlServer? _control;
+    // Update Claude Code workflow: one run at a time + the newest version the background check saw.
+    private volatile bool _claudeUpdating;
+    private volatile string? _claudeLatest;   // non-null = a newer Claude Code has shipped
+    // Where sessions live (pty-host seam, #105): chosen once at startup from `session-host`.
+    // Every session is created through this — never via `new TerminalSession` directly.
+    private static ISessionBackend _sessionBackend = InProcessSessionBackend.Instance;
+    // wagterm self-update: same pattern, app-wide (static — one process, many windows).
+    private static volatile bool _appUpdating;
+    private static volatile string? _appLatest;      // non-null = a newer wagterm release exists
+    private static volatile bool _updateQuitting;    // closing all windows to apply an update
+
+    // ---- Multi-session model (agterm workspaces -> sessions), mirrors the WinUI shell ----
+    private readonly List<Workspace> _workspaces = new(); // source of truth; guarded by lock(_workspaces)
+    private bool _restoring;                              // suppress SaveState while rebuilding from disk
+    private Ses? _active;
+    private const float DividerW = 6f;                       // THICKNESS of the gutter between panes, along the session's axis (a column gap on a vertical split, a row gap on a horizontal one)
+    private bool _divDragging;                        // dragging a pane divider
+    private int _divLeft;                             // index of the pane BEFORE the divider being dragged (the left pane on a vertical split, the top pane on a horizontal one)
+    // Actions queued from the pipe (background) thread to run on the UI thread. Each sits in a slot
+    // the poster can WITHDRAW when its wake-up message could not be posted (#228 item 4): the drain
+    // takes a slot or the poster withdraws it, never both, so "nothing was applied" is true whenever
+    // Post says so — also on a live window whose posted-message quota refused the wake-up, where a
+    // later drain used to run the stranded action after the caller had been told nothing did.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<UiAction> _uiActions = new();
+    private sealed class UiAction
+    {
+        private readonly Action _run; private int _state;   // 0 queued, 1 taken by the drain, 2 withdrawn
+        public UiAction(Action run) => _run = run;
+        /// <summary>The drain's side: runs the action unless it was withdrawn. Exceptions are the caller's.</summary>
+        public void RunIfQueued() { if (Interlocked.CompareExchange(ref _state, 1, 0) == 0) _run(); }
+        /// <summary>The poster's side: true when the action was still queued and will now never run;
+        /// false when the drain already took it (an earlier wake-up reached it first).</summary>
+        public bool TryWithdraw() => Interlocked.CompareExchange(ref _state, 2, 0) == 0;
+    }
+    /// <summary>Cancelled in WM_DESTROY: every pipe thread parked in InvokeOnUiQueued wakes and
+    /// answers "window closed" instead of waiting for a message loop that will never run its action.</summary>
+    private readonly CancellationTokenSource _uiGone = new();
+
+    // Chrome geometry (custom title bar + status bar, drawn in Direct2D).
+    // Compact toolbar (agterm) shrinks the custom title bar; read live so a config toggle reflows everything.
+    /// <summary>Effective toolbar mode: explicit toolbar-mode, else derived from the legacy compact-toolbar bool.</summary>
+    private static string ToolbarModeResolved =>
+        _config?.ToolbarMode is "normal" or "compact" or "hidden" ? _config.ToolbarMode!
+        : (_config is { CompactToolbar: true } ? "compact" : "normal");
+    private float TitleBarH => _isQuickWindow ? 0f : ToolbarModeResolved switch { "hidden" => 0f, "compact" => 30f, _ => 40f };
+    private static bool ToolbarHidden => ToolbarModeResolved == "hidden";
+    private const float FooterH = 34f;       // toolbar at the bottom of the sidebar
+    // The default and the 120..600 range live in Wagterm.Pty.SidebarWidths, with the chrome
+    // geometry that derives them, so the control server can refuse an out-of-range `sidebar width`
+    // before this assembly is reached.
+    private const float SidebarWFull = Wagterm.Pty.SidebarWidths.Default;
+    private const float CaptionBtnW = 46f;   // native min/max/close hit width
+    private float _sidebarW = SidebarWFull;            // 0 when collapsed; otherwise == _sidebarWShown
+    // The width the sidebar has when shown. `sidebar width` sets THIS; ToggleSidebar copies it into
+    // _sidebarW on show, and it is what the state file's SidebarWidth carries — so a width set while
+    // hidden is remembered across the next show and a restart instead of being lost to SidebarWFull.
+    private float _sidebarWShown = SidebarWFull;
+
+    // Sidebar view mode + workspace focus (Wave D1). Tree = the normal workspace→session outline;
+    // Flagged = a flat working-set of every flagged session across all workspaces. Focus (tree only)
+    // shows just one workspace. The two are independent and both persist.
+    private enum SidebarMode { Tree, Flagged }
+    private SidebarMode _sidebarMode = SidebarMode.Tree;
+    private string? _focusedWorkspaceId;               // when set (tree mode), render only this workspace
+    private static readonly object _showAllMarker = new();    // sidebar row sentinel: click clears workspace focus
+
+    private float ContentX => _sidebarW + PadX;        // terminal's left origin
+    private float ContentY => TitleBarH + PadY;        // terminal's top origin (below the title bar)
+
+    // Row hit-boxes rebuilt each paint: (top, bottom, isWorkspace, item(Workspace|Ses)).
+    private readonly List<(float y0, float y1, bool isWs, object item)> _sidebarRows = new();
+    private readonly HashSet<string> _selectedIds = new();   // multi-selected session ids (Ctrl/Shift+click); >1 = batch mode
+    private string? _selAnchorId;                             // anchor session for Shift+range selection
+    // Chrome button hit-boxes rebuilt each paint: (x0, x1, action).
+    private readonly List<(float x0, float x1, string action)> _titleButtons = new();
+    private readonly List<(float x0, float x1, string action)> _footerButtons = new();
+
+    // Sidebar drag-reorder (in-memory only; the shell has no persistence yet).
+    private bool _sbPress;         // left button pressed on a sidebar list row (click-vs-drag pending)
+    private object? _pressItem;    // row under the press (Ses|Workspace|null)
+    private int _pressX, _pressY;  // press point (client px)
+    private bool _dragging;        // past the threshold -> reordering
+    private object? _dragItem;     // Ses or Workspace being dragged
+    private int _dragX, _dragY;    // current cursor (client px) while dragging
+    private const int DragThreshold = 5;
+    private int _hoverCaption; // 0 none, 1 min, 2 max, 3 close (for hover paint)
+    private int _capPressed;   // HT* of a pressed caption button (for click + pressed paint)
+
+    // Custom chrome buttons: hover/press states + fade animation (so our buttons feel like the caption buttons).
+    private string? _hotBtn;   // chrome button id currently under the cursor
+    private string? _hotPaint; // button being painted with the hover fill (lingers during fade-out)
+    private float _hotAlpha;   // 0..1 hover-fill alpha (eased by the fade timer)
+    private string? _pressBtn; // chrome button id pressed (fires on release over the same button)
+    private bool _mouseTracking; // TrackMouseEvent armed (for WM_MOUSELEAVE)
+    private bool _rbtnForwarded; // right-button press was forwarded to the app (mouse reporting), so forward the release too
+    private const int HoverTimer = 8;   // WM_TIMER id for the hover fade
+    private bool _chromeDark = true; // active theme is dark (set by RecomputeChrome)
+    private string? _toastText;
+    private Ses? _toastTarget;   // when the toast is a notification banner: click it to jump to this session
+    private Rect _toastRect;     // last-drawn banner rect (for click-to-jump hit-testing)
+    private bool _trayAdded;     // whether the Shell_NotifyIcon tray icon has been created (for OS balloons)
+    private IntPtr _hIconTray;   // app icon at the tray's small-icon size (falls back to IDI_APPLICATION)
+
+    // Terminal text selection drag + multi-click (word/line) tracking.
+    private bool _selecting;       // left-drag selecting text in the content region
+    private bool _selMoved;        // moved past a cell during the drag (distinguishes click from select)
+    private int _lastClickMs, _clickCount;
+    private Pane? _selPane;        // pane the current selection drag belongs to (locked at press)
+    private int _selAutoDir;       // drag-autoscroll: -1 mouse above pane, +1 below, 0 in-bounds
+    private int _selMouseX;        // last drag X (client px) for column tracking during autoscroll
+    private const int SelAutoTimer = 7;   // WM_TIMER id for drag-autoscroll ticks
+
+    // Command palette overlay (⌃P sessions / ⌃⇧P actions / ⌃⇧I attention).
+    private enum PaletteKind { None, Sessions, Actions, Attention, Themes, Custom, Windows, Omp, NewSession, Starship, PromptEngine, Fonts }
+    private sealed class PalItem
+    {
+        public required string Label;
+        public string Secondary = "";
+        public string Search = "";
+        public string Hint = "";
+        public AgentStatus? Dot;      // leading status dot (attention/sessions)
+        public object? Data;          // e.g. the Theme for live-preview
+        public Action? Run;           // null = non-actionable placeholder
+        public Func<bool>? Enabled;   // asked when the row is shown and again when it is run; false = dim and inert (menu + palette)
+        public bool Checked;          // a check mark in the menu gutter (File ▸ Open Window marks the open ones)
+        public Func<List<PalItem>>? Submenu;   // a flyout the row opens instead of running (menu rows)
+    }
+    private PaletteKind _palette = PaletteKind.None;
+
+    // In-terminal search (find bar over the active pane's buffer + scrollback).
+    private bool _searchActive;
+    private string _searchQuery = "";
+    private readonly List<(int Line, int Col0, int Col1)> _searchMatches = new(); // absolute line index (history ++ live)
+    private int _searchCur;
+
+    // Keymap: chord (canonical string) -> action id or "command:<Label>"; custom commands from keymap.conf.
+    private static Dictionary<string, string> _keymap = new(StringComparer.OrdinalIgnoreCase);
+    private static List<Keymap.CmdDef> _commands = new();
+    private static string[] _keymapDiag = Array.Empty<string>();
+
+    // Leader/prefix chord (tmux-style): press the leader, then a second chord resolves against
+    // _leaderBindings. While pending we paint a hint and swallow keys; Esc / timeout cancels.
+    private static string? _leader;   // configured leader chord (from keymap.conf; app-global config)
+    private static Dictionary<string, string> _leaderBindings = new(StringComparer.OrdinalIgnoreCase);
+    private bool _leaderPending;
+    private long _leaderAtMs;
+    private const long LeaderTimeoutMs = 3000;
+
+    // MRU (most-recently-used) session switcher — Ctrl+Tab walks the recency stack (Alt+Tab semantics).
+    // _mru holds session ids, front = most recently active. During a walk we preview-select the target
+    // but suppress recency updates; releasing Ctrl commits (fronts the target); Esc cancels back to start.
+    private readonly List<string> _mru = new();
+    private bool _mruWalking;
+    private List<Ses> _mruSnapshot = new();  // recency-ordered sessions captured at walk start
+    private int _mruIdx;                      // current target index into _mruSnapshot
+    private Ses? _mruStart;                   // session active when the walk began (for Esc cancel)
+
+    private string _palQuery = "";
+    private int _palSel;
+    private readonly List<PalItem> _palAll = new();
+    private readonly List<PalItem> _palItems = new();
+    private readonly List<(float y0, float y1, int idx)> _palRows = new();
+    private Rect _palPanel;    // panel bounds (for click-outside-to-close)
+
+    // Inline rename (native child EDIT overlaid on the row being renamed).
+    private const int EDIT_ID = 101;
+    private IntPtr _editHwnd;
+    private object? _editing;         // Ses or Workspace currently being renamed
+    private static WndProc _editProc = null!; // kept alive; subclasses the EDIT to catch Enter/Esc
+    private IntPtr _editOrigProc;
+    private IntPtr _editFont;                 // the rename box's HFONT at this window's scale (matches the sidebar)
+    private static readonly Dictionary<int, IntPtr> _editFonts = new();   // by pixel height: windows on different monitors share by size
+    private static IntPtr _editBrush;         // cached dark background brush (WM_CTLCOLOREDIT)
+
+    private void EnsureEditGdi()
+    {
+        // Segoe UI ~13 DIP to match the sidebar row text; ClearType; dark bg like the sidebar.
+        int px = ToDevice(13);
+        lock (_editFonts)
+            if (!_editFonts.TryGetValue(px, out _editFont))
+                _editFonts[px] = _editFont = CreateFontW(-px, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI");
+        if (_editBrush == IntPtr.Zero)
+            _editBrush = CreateSolidBrush(RGB(41, 51, 64)); // == SbHighlight, so the box blends with the row
+    }
+
+    // Chrome fonts (native Segoe UI for text, icon font for glyphs).
+    private static IDWriteTextFormat _uiFont = null!;
+    private static IDWriteTextFormat _uiSmall = null!;
+    private static IDWriteTextFormat _sidebarFont = null!;     // sidebar names (size = config sidebar-font-size)
+    private static IDWriteTextFormat _sidebarSmall = null!;    // sidebar counts/badges (sidebar-font-size − 1.5)
+    private static IDWriteTextFormat _sidebarCtx = null!;      // the row's dimmed session.context suffix: _sidebarSmall's size + "…" trimming (P3)
+    private static IDWriteInlineObject? _sidebarCtxEllipsis;   // its trimming sign (rebuilt with the font)
+    private static IDWriteTextFormat _uiSmallCenter = null!;   // horizontally centered (panel buttons)
+    private static IDWriteTextFormat _uiTitle = null!;      // single centered title-bar line (vertically centered + ellipsized)
+    private static IDWriteInlineObject _ellipsis = null!;   // "…" trimming sign for the title (kept alive)
+    private static IDWriteTextFormat _uiSmallTrim = null!;  // _uiSmall + "…" trimming: the title bar's dimmed session.context suffix (P3)
+    private static IDWriteInlineObject _ellipsisSmall = null!; // its trimming sign (kept alive)
+    private static IDWriteInlineObject? _sidebarEllipsis;   // "…" trimming sign for sidebar names (rebuilt with the font)
+    private static IDWriteTextFormat _iconFont = null!;
+    private static IDWriteTextFormat _iconSmall = null!;   // small Fluent glyphs (e.g. the row flag marker)
+
+    /// <summary>One terminal surface within a session. A session is a row of panes along its
+    /// <see cref="Ses.Axis"/>: left→right when vertical, top→bottom when horizontal.</summary>
+    private sealed class Pane
+    {
+        public required string Id;
+        public required ISession S;
+        public string? StartCwd;   // dir the shell was launched in (fallback cwd when OSC 7 is absent)
+        public string? AgentResume; // resumable agent bound to this pane (e.g. "claude") — relaunched on restart
+        // Bumped by every bind request; a SessionStart binding resolved in the background lands only if
+        // no later bind arrived meanwhile, so startup-then-/clear cannot leave the older id bound (#316).
+        public int BindSeq;
+        public string? RestoreCommand; // pinned restore command (agterm #271) — always re-run on restart
+        // The captured foreground command — the restore slot (PaneState.Command, "" on disk = none), re-run
+        // on restart when restore-commands is on. Written by `restore capture` and by the quit-time capture
+        // (SaveState(captureCommands: true)), READ by every save (P3). Before P3 the capture lived only in a
+        // local dictionary inside SaveState at quit, so every ordinary save wrote "" over the slot and a
+        // crash / Stop-Process never filled it; one field, one writer per capture, one reader.
+        public string? CapturedCommand;
+        // Overlay panes only (#227): completed once, with the outcome of THIS pane — "exit N" when its
+        // program exits, "closed" when the overlay is closed or replaced first. `overlay open --block`
+        // waits on the source of the pane it opened, so two blocking opens in one window each get
+        // their own program's status; the window-wide last exit (`overlay result`) stays separate.
+        public TaskCompletionSource<string>? OverlayDone;
+        // P5: this pane's overlay slot — a program run over exactly this pane's box while the sibling
+        // pane stays visible and interactive (the rule is on ISessionHost.SessionOverlay). One slot
+        // type with the session-wide slot (Ses.Overlay); SizePercent is always 0 here (a pane overlay
+        // is always full-pane). The slot lives ON the pane, not on the session keyed by index, so a
+        // swap / a survivor promotion move it by construction and ClosePane disposes it with the
+        // pane. Unused on a cover pane (an overlay term, scratch, quick) — nothing opens an overlay
+        // over an overlay.
+        public readonly OverlaySlot Overlay = new();
+        // The pane's StartAsync task (CreatePane's command branches). A start that FAILS sets
+        // HasExited without raising Exited — both session kinds catch the spawn failure and keep
+        // the surface to show it — so a watcher that needs an end (WatchOverlayExit) observes this
+        // instead, and treats a task that faulted anyway as the same end.
+        public Task? Start;
+        public float FontSize;     // per-pane font zoom (pt)
+        public bool FontZoomed;   // reset resumes inheritance; equal numeric sizes alone do not
+        public float Ratio = 1f;   // this pane's OWN share of the session's extent along its axis (width when vertical, height when horizontal); PaneLayout normalises by the sum
+        public int ScrollOffset;   // lines scrolled up from the live bottom (0 = live; clamped to HistoryCount)
+        public long LastScrollGen; // emulator ScrollGeneration last seen on output (detects real scroll vs in-place repaint)
+        public int Unread;         // unread desktop-notification count (OSC 9/777 / notify) since last visit
+        public NotificationCategory UnreadCategory; // highest priority among unread notifications
+        public bool ReadOnly;      // block keyboard input to this pane (protect a running agent from stray keys)
+        public bool ProfileShell; // profile/login shell, not a session new --command pane
+        public int? ProfileExitCode; // ended profile shell; independent of agent status
+        public bool AwaitingExitAck; // hold prompt is visible; Enter may close this session
+        // Text selection (absolute line index: [0..HistoryCount) history, then the live grid rows).
+        public bool HasSel;
+        public int SelAncLine, SelAncCol, SelFocLine, SelFocCol;
+        // The buffer as it was when the selection was made. Absolute indices only mean anything
+        // relative to this: scrolling leaves them alone, but EVICTION renumbers, and the alt screen
+        // is a different buffer entirely. Everything is recorded at selection time and compared on
+        // the UI thread when the selection is used, so nothing about a selection is ever written
+        // from the thread reading the pty. SelTrackable = false means the shift cannot be measured
+        // at all (no scrollback, a partial DECSTBM region, the alt screen) — such a selection cannot
+        // follow its text, so it stays on the cells it covers and copies exactly what they hold.
+        public long SelGen;
+        public int SelHist;
+        public bool SelAlt, SelTrackable;
+        public bool BlockSel;   // rectangular (Alt+drag) selection: clip each row to [minCol,maxCol]
+        public void ClearSel() => HasSel = false;
+        public int UiaAnnouncedAbs = -1;   // absolute buffer line (history + cursor row) last spoken to a screen reader
+    }
+
+    private sealed class Ses
+    {
+        private static int _nextUiaIdentity;
+        public readonly int UiaIdentity = Interlocked.Increment(ref _nextUiaIdentity);
+        public required string Id;
+        public required string Name;
+        public required Workspace Ws;
+        public readonly List<Pane> Panes = new();
+        public int Active;         // index of the focused pane
+        // The split's orientation, one of SplitAxes' words: vertical = left/right panes (the default of
+        // a session never split), horizontal = top/bottom. PER SESSION (agterm's model; a per-pane axis
+        // would be a tree layout, which is not the item), kept across `split off` so the next `on`
+        // without --axis splits the way the session was last split. PaneLayout is the ONE place that
+        // turns it into geometry; every hit-test and the renderer go through the layout tuples.
+        public string Axis = SplitAxes.Vertical;
+        public bool Flagged;       // durable working-set flag (survives moves; persisted; drives flagged sidebar mode)
+        public bool Elevated;      // shell runs at High integrity (admin) — shown with a ⚡; false for de-elevated sessions
+        public string? CustomName; // user-renamed title (null = show the cwd/OSC title in the title bar, agterm-style)
+        public string? Link;       // session.link: the one http(s) URL this session is about (tracker issue, PR); opened by open_session_link / the sidebar glyph; persisted; null = none. SessionLinks holds the rules.
+        public string? Context;    // session.context: one line of "what is this pane for", set over the API (P3); drawn dimmed beside the name; persisted; null = none. Per session, not per pane — SessionContexts holds the rules.
+        public string? ProfileName; // shell profile this session launched with (null = default; persisted)
+        public Pane? Scratch;      // per-session scratch terminal (lazy; kept alive when hidden; not restored)
+        // The SESSION-WIDE overlay slot (Wave B3): an ephemeral program run over the whole session —
+        // every pane, and any pane overlay under it — shown as the kind-3 cover while the session is
+        // active. Per session, so another session's open cannot reset its exit. The per-PANE slots are
+        // Pane.Overlay (P5); the type is the same.
+        public readonly OverlaySlot Overlay = new();
+        public HudSpec? Hud;      // passive session-wide presentation, never restored or a PTY
+        // Wave F2: per-session background watermark (a faint image drawn behind the terminal of every pane).
+        public string? BgPath;      // absolute path to the copied image under AppDir\backgrounds (null = none)
+        public int BgOpacity = 15;  // 0..100 (drawn opacity of the watermark)
+        public string BgMode = "fit"; // fit | fill | center | tile
+        public Pane ActivePane => Panes[Math.Clamp(Active, 0, Panes.Count - 1)];
+        // Back-compat shims: existing code that said ses.S / ses.FontSize / ses.StartCwd
+        // now refers to the ACTIVE PANE, so most single-pane logic is unchanged.
+        public ISession S => ActivePane.S;
+        public float FontSize { get => ActivePane.FontSize; set => ActivePane.FontSize = value; }
+        public string? StartCwd { get => ActivePane.StartCwd; set => ActivePane.StartCwd = value; }
+    }
+
+    private sealed class Workspace
+    {
+        public required string Id;
+        public required string Name;
+        public readonly List<Ses> Sessions = new();
+        public bool Expanded = true;
+        public string? DefaultDir;
+    }
+
+    /// <summary>One overlay slot (P5): the ONE type behind the session-wide slot (<see cref="Ses.Overlay"/>,
+    /// shown as the kind-3 cover) and the per-pane slots (<see cref="Pane.Overlay"/>, drawn over that
+    /// pane's box). A slot is empty while <see cref="Term"/> is null; the fields describe the program
+    /// running (or, with <c>--wait</c>, just exited) in it. <see cref="Term"/> is written under
+    /// <c>_overlayExitLock</c> — OverlayOpen's assign, the close's null-out and the exit's guard are one
+    /// locked step, so an exit landing on the pty thread never stamps a replaced or closed term's code.
+    /// <see cref="Pane.OverlayDone"/> stays on the overlay term itself: it is per program RUN, and a
+    /// <c>--block</c> caller holds the source of the term its own open created.</summary>
+    private sealed class OverlaySlot
+    {
+        public Pane? Term;        // the overlay's terminal (a cover-kind pane) while the slot is open; null = empty
+        public int SizePercent;   // session-wide slot only: 0 = full content region; 1..100 = centered floating panel. Always 0 on a pane slot (full-pane, never floating)
+        public bool Wait;         // keep the overlay after its program exits (press a key to close)
+        public bool Exited;       // the program has exited and the overlay is awaiting that key (the --wait banner)
+        public int ExitCode;      // that program's exit code (drawn in the banner)
+        // Pane slots only: `session overlay result --pane X` — "exit N" of the last program that ran in
+        // THIS slot, reset to NoResult by each open (mirroring the window-wide _lastOverlayExit reset);
+        // masked by "overlay still running" while a program is up. Written under _overlayExitLock by
+        // WatchOverlayExit, read under it by the host. The session-wide slot does not use it: its
+        // `result` stays the window-wide _lastOverlayExit (the divergence recorded in the P5 plan).
+        public string LastResult = OverlayPanes.NoResult;
+    }
+
+    private float _cellW = 8, _cellH = 16;
+    private bool _cursorOn = true;
+    private readonly StringBuilder _run = new(256);   // reused per text run (no per-cell alloc)
+    private int _redrawPending;                       // coalesces redraw requests into one paint
+    // Frame cap for output-driven repaints: under sustained PTY output, paint at most ~66fps instead
+    // of back-to-back full renders (which saturate a core and starve the pump via grid-lock contention).
+    // The first frame after a quiet period still paints immediately — no interactive latency cost.
+    private const int RedrawTimer = 10;               // WM_TIMER id for the deferred frame
+    private const int RedrawMinIntervalMs = 15;
+    private const int UiaAnnounceTimer = 11;          // debounce: announce new output to a screen reader
+    private const int UiaAnnounceQuietMs = 350;       // speak once output has settled this long
+    private const int BellFlashTimer = 13;            // WM_TIMER id: clear the visual-bell flash overlay
+    private long _bellFlashUntil;                     // TickCount64 the visual-bell flash is drawn until
+    private long _lastBellTick;                       // coalesce a BEL flood into one ring
+    private long _lastPaintTick;                      // Environment.TickCount64 of the last WM_PAINT render
+    private bool _redrawTimerArmed;
+
+    // Decoded Kitty images are scoped by terminal core as well as KittyImage instance: image ids
+    // are pane-local, and visible split panes must not prune or supersede one another's work.
+    private const int MaxConcurrentImageDecodes = 2;
+    private readonly Dictionary<ITerminalCore, Dictionary<KittyImage, ID2D1Bitmap>> _imageCaches
+        = new(ReferenceEqualityComparer.Instance);
+    private readonly HashSet<ITerminalCore> _imageOwnersThisFrame
+        = new(ReferenceEqualityComparer.Instance);
+    private readonly ImageDecodeTracker _imageDecodes = new();
+    // Background-decoded pixels waiting to be uploaded to a GPU texture on the UI thread.
+    // bgra == null releases the conversion slot; failed distinguishes a bad image from stale work.
+    private readonly System.Collections.Concurrent.ConcurrentQueue<
+        (ITerminalCore owner, KittyImage img, byte[]? bgra, int w, int h, bool failed)> _decoded = new();
+    private static readonly bool _noImages = Environment.GetEnvironmentVariable("WAGTERM_NOIMG") == "1";
+
+    // Wave F2: session background watermarks. A separate cache keyed by the copied file path
+    // (one bitmap per distinct image, at native size); decode happens off the UI thread just like
+    // the Kitty pipeline, so a background image never stalls rendering — it appears on a later frame.
+    private readonly Dictionary<string, ID2D1Bitmap> _bgCache = new();
+    private readonly DecodeMailbox<string, (byte[]? bgra, int w, int h)> _backgroundDecodes = new();
+
+    // ---- CLI launch args (wt-style, applied to the first window): ----
+    //   wagterm.exe [-p|--profile NAME] [-d|--dir PATH] [--maximized] [--fullscreen]
+    private static bool _argNoRestore;   // --no-restore: fresh window, don't reopen the saved tree (elevated launch)
+    private static string? _argPipe;     // --pipe <name>: control-pipe name (default = the instance id)
+    private static string? _argProfile;
+
+    // Instance identity: namespaces the data dir (%LOCALAPPDATA%\<id>), control pipe, and window/tray title
+    // so a dev build and the installed release keep entirely separate configs, sessions, and control surface
+    // and never step on each other. A Debug build is ALWAYS "wagterm-dev"; the shipped Release build is
+    // "wagterm". Override with --app-id <name>; a Release build also inherits WAGTERM_APP_ID (nesting).
+    private static readonly string _appId = ResolveAppId();
+    private static bool IsDev => _appId != "wagterm";
+    internal static string AppName => _appId;
+    internal static string DisplayName => _appId == "wagterm" ? "WagTerm" : _appId == "wagterm-dev" ? "WagTerm Dev" : _appId;
+
+    private static string ResolveAppId()
+    {
+        // An explicit --app-id always wins.
+        var args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length - 1; i++)
+            if (args[i].Equals("--app-id", StringComparison.OrdinalIgnoreCase))
+                return SanitizeId(args[i + 1]);
+#if DEBUG
+        // A Debug build is dev PERIOD — it must not adopt a release identity just because it was launched
+        // from inside a release session (which exports WAGTERM_APP_ID), or it would collide with it.
+        return "wagterm-dev";
+#else
+        // Release: inherit WAGTERM_APP_ID so a nested wagterm shares its parent's identity, else default.
+        if (Environment.GetEnvironmentVariable("WAGTERM_APP_ID") is { Length: > 0 } env)
+            return SanitizeId(env);
+        return "wagterm";
+#endif
+    }
+
+    /// <summary>Reduce an app-id to a safe file/pipe token (letters, digits, dash, underscore, dot).</summary>
+    private static string SanitizeId(string s)
+    {
+        var chars = s.Trim().Where(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.').ToArray();
+        var id = new string(chars);
+        return string.IsNullOrEmpty(id) ? "wagterm" : id;
+    }
+    private static string? _argDir;
+    private static bool _argMaximized, _argFullscreen;
+    private static bool _argPtyHost;   // run as the headless pty-host (#105) instead of a window
+    private static string? _argConpty;   // the pty-host role's conpty key, passed by the UI (#339)
+    private static string? _argDefaultSessionHost;   // first-run seed for session-host (installer hook)
+
+    private static void ParseLaunchArgs(string[] args)
+    {
+        for (int i = 0; i < args.Length; i++)
+        {
+            switch (args[i].ToLowerInvariant())
+            {
+                case "-p" or "--profile" when i + 1 < args.Length: _argProfile = args[++i]; break;
+                case "-d" or "--dir" or "--startingdirectory" when i + 1 < args.Length: _argDir = args[++i]; break;
+                case "--maximized": _argMaximized = true; break;
+                case "--fullscreen": _argFullscreen = true; break;
+                case "--no-restore": _argNoRestore = true; break;
+                case "--pipe" when i + 1 < args.Length: _argPipe = args[++i]; break;
+                case "--pty-host": _argPtyHost = true; break;
+                case "--conpty" when i + 1 < args.Length: _argConpty = args[++i]; break;
+                case "--default-session-host" when i + 1 < args.Length: _argDefaultSessionHost = args[++i]; break;
+                case "--app-id" when i + 1 < args.Length: ++i; break; // consumed by ResolveAppId (namespaces data dir + pipe)
+                                                                      // unknown args are ignored (forward compatibility)
+            }
+        }
+        if (_argDir is not null)
+            try { _argDir = Path.GetFullPath(_argDir); if (!Directory.Exists(_argDir)) _argDir = null; } catch { _argDir = null; }
+    }
+
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        ParseLaunchArgs(args);
+        // Publish the resolved instance id so child processes and shared (Pty) helpers resolve the same
+        // data dir — and a nested wagterm inherits the dev/release identity of the one that launched it.
+        Environment.SetEnvironmentVariable("WAGTERM_APP_ID", _appId);
+        // The pty-host ROLE (#105): same exe, no window — a headless server owning terminal sessions
+        // so they survive UI restarts/crashes. The UI (Phase 2b) spawns and talks to it; nothing
+        // below (config, D2D, window class, control server) applies to this process.
+        if (_argPtyHost)
+        {
+            ConPtyApi.Select(_argConpty == "bundled");   // no flag = inbox, as for the Rust host
+            using var ptyHost = new Wagterm.Pty.PtyHostServer(_argPipe ?? _appId);
+            ptyHost.Completion.Wait();
+            return;
+        }
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        // Process-global setup (config/themes/keymap + window class + shared D2D/DWrite objects).
+        _config = LoadOrCreateConfig();
+        ConPtyApi.Select(_config.Conpty != "inbox");
+        _sessionBackend = SessionBackends.Resolve(_config.SessionHost, _argPipe ?? _appId, AppExePath, _config.Conpty);
+        ResolveEmulatorCore();
+        _allThemes = LoadThemes();
+        _theme = FindTheme(_config.Theme);
+        LoadKeymap();
+
+        IntPtr hInstance = GetModuleHandleW(null);
+        _wndProc = WindowProc;
+
+        var wc = new WNDCLASSEXW
+        {
+            cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<WNDCLASSEXW>(),
+            style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS,
+            lpfnWndProc = _wndProc,
+            hInstance = hInstance,
+            hCursor = LoadCursorW(IntPtr.Zero, IDC_ARROW),
+            lpszClassName = ClassName,
+        };
+        if (RegisterClassExW(ref wc) == 0)
+            throw new InvalidOperationException("RegisterClassExW failed: " + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+
+        // Direct2D / DirectWrite (shared across windows; DWrite objects are device-independent).
+        _d2d = D2D1.D2D1CreateFactory<ID2D1Factory>(Vortice.Direct2D1.FactoryType.SingleThreaded);
+        _dwrite = DWrite.DWriteCreateFactory<IDWriteFactory>();
+        _format = CreateTextFormat(_config);
+        ResolveFamilyFont();
+        _uiFont = NewChromeFormat("Segoe UI", 13f, center: false);
+        _uiSmall = NewChromeFormat("Segoe UI", 11.5f, center: false);
+        RebuildSidebarFonts();
+        _uiSmallCenter = NewChromeFormat("Segoe UI", 11.5f, center: true);
+        _uiTitle = NewChromeFormat("Segoe UI", 13f, center: true); // vertically centered single line
+        _ellipsis = _dwrite.CreateEllipsisTrimmingSign(_uiTitle);
+        _uiTitle.SetTrimming(new Trimming { Granularity = TrimmingGranularity.Character }, _ellipsis);
+        _uiSmallTrim = NewChromeFormat("Segoe UI", 11.5f, center: false);
+        _ellipsisSmall = _dwrite.CreateEllipsisTrimmingSign(_uiSmallTrim);
+        _uiSmallTrim.SetTrimming(new Trimming { Granularity = TrimmingGranularity.Character }, _ellipsisSmall);
+        _iconFont = NewChromeFormat("Segoe Fluent Icons", 14f, center: true);
+        _iconSmall = NewChromeFormat("Segoe Fluent Icons", 10.5f, center: true);
+
+        // Multi-window: load the window library (migrating a legacy state.json), then open every
+        // window that was open at last quit. Each open window is its own Program instance routed by
+        // HWND; Frontmost is what un-scoped control verbs act on.
+        _hInstance = hInstance;
+        _profileCfg = Wagterm.Pty.ShellProfiles.Load(AppDir);   // shell profiles (seed profiles.json on first run)
+        LoadOrMigrateIndex();
+        List<WinMeta> toOpen;
+        lock (_windowIndex)
+        {
+            toOpen = _windowIndex.Where(m => m.IsOpen).ToList();
+            if (toOpen.Count == 0 && _windowIndex.Count > 0) { _windowIndex[0].IsOpen = true; toOpen.Add(_windowIndex[0]); }
+        }
+        Program? front = null;
+        foreach (var m in toOpen)
+        {
+            var w = CreateWindowInstance(m);
+            if (m.Id == _frontmostId) front = w;
+            front ??= w;
+        }
+        Frontmost = front!;
+        // Experimental knobs announce themselves once at startup — never a silent mystery.
+        if (_emulatorCoreNote is { } note)
+            front!.Post(() => front.ShowToast(note, 6000));
+        if (_fontFallbackNote is { } fontNote)
+            front!.Post(() => front.ShowToast(fontNote, 8000));
+        // Server mode is experimental (#105) — say so once at startup, so a flipped knob is never
+        // a silent mystery ("why is there a second wagterm process?").
+        if (_sessionBackend is ServerSessionBackend sb)
+        {
+            string host = sb.Name == "server-rust" ? "the Rust pty-host binary" : "the pty-host process";
+            front!.Post(() => front.ShowToast($"session-host = {sb.Name} (experimental) — sessions live in {host}", 6000));
+            // All restore handles have already claimed their hosted IDs in the backend. New
+            // handles claim before async creation too, not after publication in the UI tree.
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30));
+                sb.ReapUnclaimedStartupSessions();
+            });
+        }
+
+        while (GetMessageW(out MSG msg, IntPtr.Zero, 0, 0) > 0)
+        {
+            TranslateMessage(ref msg);
+            DispatchMessageW(ref msg);
+        }
+    }
+
+    /// <summary>Clamp a restored window frame onto the nearest visible monitor work area, so a frame
+    /// saved on a display that's since been unplugged or rearranged can't restore off-screen.</summary>
+    private static void ClampGeoToVisibleScreen(ref int x, ref int y, ref int w, ref int h)
+    {
+        var rc = new RECT { left = x, top = y, right = x + w, bottom = y + h };
+        IntPtr mon = MonitorFromRect(ref rc, MONITOR_DEFAULTTONEAREST);
+        var mi = new MONITORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFO>() };
+        if (mon == IntPtr.Zero || !GetMonitorInfoW(mon, ref mi)) return;
+        var wa = mi.rcWork;
+        w = Math.Min(w, wa.right - wa.left);
+        h = Math.Min(h, wa.bottom - wa.top);
+        x = Math.Clamp(x, wa.left, wa.right - w);
+        y = Math.Clamp(y, wa.top, wa.bottom - h);
+    }
+
+    /// <summary>Per-window bootstrap: create the HWND, its render target, and the initial session.</summary>
+    private void Boot(IntPtr hInstance)
+    {
+        RecomputeChrome();
+        MeasureCell();
+
+        // Window size/position comes from the WindowLibrary entry (set by CreateWindowInstance);
+        // _geoValid/_geo* are already populated for a restored/positioned window.
+        // Created hidden (no WS_VISIBLE) so we can position it before the first paint; shown at the end.
+        // A restored frame can land off every monitor (a display was unplugged / rearranged since save),
+        // leaving the window invisible and unreachable — clamp it onto the nearest visible work area first.
+        if (_geoValid) ClampGeoToVisibleScreen(ref _geoX, ref _geoY, ref _geoW, ref _geoH);
+        _creating = this;                    // so the WindowProc trampoline can resolve us during CreateWindowExW
+        _hwnd = _isQuickWindow
+            ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, ClassName, "WagTerm quick terminal", WS_POPUP,
+                0, 0, 640, 480, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero)
+            : _geoValid
+            ? CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW,
+                _geoX, _geoY, _geoW, _geoH, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero)
+            : CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 660, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
+        _creating = null;
+        if (_hwnd == IntPtr.Zero)
+            throw new InvalidOperationException("CreateWindowExW failed: " + System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+        _registry[_hwnd] = this;
+
+        // Win11 rounded corners: our custom frame (WM_NCCALCSIZE) suppresses the automatic rounding,
+        // so opt in explicitly. Harmless no-op on Win10 / older.
+        try { int pref = DWMWCP_ROUND; DwmSetWindowAttribute(_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref pref, sizeof(int)); } catch { }
+
+        // App icon for the window (taskbar + alt-tab); the exe icon comes from <ApplicationIcon>.
+        // Single-file portable exe has no assets\ dir — extract the icon compiled into the exe instead.
+        try
+        {
+            IntPtr hIconBig = IntPtr.Zero, hIconSm = IntPtr.Zero;
+            string icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "assets", "wagterm.ico");
+            if (System.IO.File.Exists(icoPath))
+            {
+                hIconBig = LoadImageW(IntPtr.Zero, icoPath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+                hIconSm = LoadImageW(IntPtr.Zero, icoPath, IMAGE_ICON, 16, 16, LR_LOADFROMFILE);
+            }
+            else if (Environment.ProcessPath is { } exe)
+            {
+                ExtractIconExW(exe, 0, out hIconBig, out hIconSm, 1);
+            }
+            // Tray icon at the small-icon size for the current DPI (16px is blurry at 125%+).
+            if (System.IO.File.Exists(icoPath))
+            {
+                int trayPx = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForWindow(_hwnd));
+                _hIconTray = LoadImageW(IntPtr.Zero, icoPath, IMAGE_ICON, trayPx, trayPx, LR_LOADFROMFILE);
+            }
+            if (_hIconTray == IntPtr.Zero) _hIconTray = hIconSm;
+            if (hIconBig != IntPtr.Zero) SendMessageW(_hwnd, WM_SETICON, (IntPtr)ICON_BIG, hIconBig);
+            if (hIconSm != IntPtr.Zero) SendMessageW(_hwnd, WM_SETICON, (IntPtr)ICON_SMALL, hIconSm);
+        }
+        catch { /* icon is cosmetic; ignore load failures */ }
+
+        DragAcceptFiles(_hwnd, true);   // drop files/folders onto a pane -> quoted paths pasted
+
+        CreateRenderTarget();
+        ConfigureUia(); // every library window and the detached quick host
+        if (!_isQuickWindow) StartSession();
+
+        ApplySystemTheme();   // if "follow Windows light/dark" is on, pick light/dark before the first paint
+
+        // Apply the custom frame (WM_NCCALCSIZE strips the OS title bar) before showing.
+        SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+        // Drives the cursor pulse (when cursor-blink is on) AND the agent-status blink pulse, so it
+        // runs unconditionally; the cursor render itself stays solid when cursor-blink is disabled.
+        SetTimer(_hwnd, (IntPtr)1, (uint)_config.CursorBlinkMs, IntPtr.Zero);
+
+        if (_isQuickWindow) return; // auxiliary window is shown only by a deliberate summon
+
+        ShowWindow(_hwnd, _argMaximized || (_geoValid && _geoMax) ? SW_MAXIMIZE : SW_SHOW);
+        if (_argFullscreen) { _argFullscreen = false; ToggleFullscreen(); }   // first window only
+        _argMaximized = false;
+        _wasMaximized = IsZoomed(_hwnd);
+        ApplyWindowOpacity();
+        UpdateWindow(_hwnd);
+        if (_quickHost is null)
+        {
+            EnsureQuickHost();
+            if (SetQuickHotkey(_config.QuickTerminalHotkey) is { } why) ShowToast(why, 7000);
+        }
+    }
+
+    private static IDWriteTextFormat CreateTextFormat(TerminalConfig cfg)
+    {
+        float px = (float)cfg.FontSize;
+        using var fonts = _dwrite.GetSystemFontCollection(false);
+        _terminalFontFamily = TerminalFontFamily.Resolve(cfg.FontFamily,
+            family => fonts.FindFamilyName(family, out _));
+        _fontFallbackNote = string.Equals(cfg.FontFamily, _terminalFontFamily, StringComparison.OrdinalIgnoreCase)
+            ? null : $"Font '{cfg.FontFamily}' is not installed; using {_terminalFontFamily}";
+        return NewFormat(_terminalFontFamily, px);
+    }
+
+    private static string _terminalFontFamily = "Consolas";
+    private static string? _fontFallbackNote;
+
+    private static IDWriteTextFormat NewFormat(string family, float px,
+        FontWeight weight = FontWeight.Normal, FontStyle style = FontStyle.Normal)
+    {
+        var f = _dwrite.CreateTextFormat(family, null!, weight, style, FontStretch.Normal, px);
+        f.WordWrapping = WordWrapping.NoWrap;
+        f.TextAlignment = TextAlignment.Leading;
+        f.ParagraphAlignment = ParagraphAlignment.Near;
+        return f;
+    }
+
+    // The resolved terminal family's font object (possibly the installed fallback), for coverage checks. A glyph that IS in
+    // the (monospace) family advances exactly one cell — safe to coalesce into text runs. A glyph
+    // that falls back to another font (emoji, ⏺/✻ symbols, …) has arbitrary advance and MUST be
+    // drawn solo, anchored to its own grid column, or runs drift and overpaint their neighbours
+    // (the "overlapping text / shifted colored text" bug, issue #120).
+    private static IDWriteFont? _familyFont;
+    private static readonly Dictionary<int, bool> _glyphInFont = new();
+
+    // Deferred startup toast when `emulator-core = rust` couldn't load (shown once a window exists).
+    private static string? _emulatorCoreNote;
+
+    /// <summary>Wire `emulator-core = rust`: probe the native dll (next to the exe, then the
+    /// dev-tree cargo output), verify the ABI handshake, and install the session core factory.
+    /// Any failure falls back to the managed emulator — visibly, never silently.</summary>
+    private static void ResolveEmulatorCore()
+    {
+        if (_config.EmulatorCore != "rust") { Wagterm.Pty.TerminalSession.CoreFactory = null; return; }
+        string? err = null;
+        foreach (var dll in new[]
+        {
+            Path.Combine(AppContext.BaseDirectory, "wagterm_core.dll"),
+            Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "..", "..",
+                "native", "wagterm-core", "target", "release", "wagterm_core.dll"),
+        })
+        {
+            if (RustEmulatorCore.TryLoad(Path.GetFullPath(dll), out err))
+            {
+                Wagterm.Pty.TerminalSession.CoreFactory = (c, r) => new RustTerminalCore(c, r);
+                _emulatorCoreNote = "emulator-core = rust (EXPERIMENTAL) — new sessions run the native core";
+                return;
+            }
+            if (err is not null && !err.StartsWith("native core not found")) break;   // found but bad → stop probing
+        }
+        Wagterm.Pty.TerminalSession.CoreFactory = null;
+        _emulatorCoreNote = "emulator-core = rust unavailable (" + (err ?? "unknown") + ") — using managed";
+    }
+
+    private static void ResolveFamilyFont()
+    {
+        _glyphInFont.Clear();
+        try { _familyFont?.Dispose(); } catch { }
+        _familyFont = null;
+        try
+        {
+            using var coll = _dwrite.GetSystemFontCollection(false);
+            if (coll.FindFamilyName(_terminalFontFamily, out uint idx))
+            {
+                using var fam = coll.GetFontFamily(idx);
+                _familyFont = fam.GetFirstMatchingFont(FontWeight.Normal, FontStretch.Normal, FontStyle.Normal);
+            }
+        }
+        catch { }   // no family match → every non-ASCII glyph draws solo (safe, just slower)
+    }
+
+    /// <summary>Whether the resolved terminal family itself covers this codepoint (cached).</summary>
+    private static bool FontHasGlyph(int cp)
+    {
+        if (_glyphInFont.TryGetValue(cp, out bool has)) return has;
+        bool h = false;
+        try { h = _familyFont?.HasCharacter((uint)cp) ?? false; } catch { }
+        _glyphInFont[cp] = h;
+        return h;
+    }
+
+    // Bold/italic variants of the terminal format, per (size, style) — SGR 1/3 rendering. DWrite
+    // picks the nearest available face (and simulates oblique when the family has no italic), so
+    // this works for families without true bold/italic too. Family changes clear it (RebuildFont).
+    private static readonly Dictionary<(float Px, bool Bold, bool Italic), IDWriteTextFormat> _styledFmt = new();
+
+    private static IDWriteTextFormat StyledFormat(float px, bool bold, bool italic)
+    {
+        if (_styledFmt.TryGetValue((px, bold, italic), out var f)) return f;
+        var weight = bold ? FontWeight.Bold : FontWeight.Normal;
+        var style = italic ? FontStyle.Italic : FontStyle.Normal;
+        f = NewFormat(_terminalFontFamily, px, weight, style);
+        _styledFmt[(px, bold, italic)] = f;
+        return f;
+    }
+
+    private IDWriteTypography? _noLig;
+    /// <summary>Typography disabling ligature-forming features (calt/liga/clig/dlig/hlig) — the
+    /// ligatures=off path. Cached; created lazily on first use.</summary>
+    private IDWriteTypography NoLigTypography()
+    {
+        if (_noLig is null)
+        {
+            _noLig = _dwrite.CreateTypography();
+            foreach (var tag in new[] { FontFeatureTag.StandardLigatures, FontFeatureTag.ContextualAlternates,
+                                        FontFeatureTag.ContextualLigatures, FontFeatureTag.DiscretionaryLigatures,
+                                        FontFeatureTag.HistoricalLigatures })
+                _noLig.AddFontFeature(new FontFeature { NameTag = tag, Parameter = 0 });
+        }
+        return _noLig;
+    }
+
+    /// <summary>Draw a same-colour text run — plain DrawText (font default: ligatures on), or a text
+    /// layout with ligature features disabled when <c>ligatures = false</c>.</summary>
+    private void DrawRun(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, string text, IDWriteTextFormat fmt,
+        float rx, float y, float w, float h)
+    {
+        if (_config.Ligatures) { rt.DrawText(text, fmt, new Rect(rx, y, rx + w, y + h), brush); return; }
+        using var layout = _dwrite.CreateTextLayout(text, fmt, w, h);
+        layout.SetTypography(NoLigTypography(), new TextRange(0, (uint)text.Length));
+        rt.DrawTextLayout(new System.Numerics.Vector2(rx, y), layout, brush);
+    }
+
+    /// <summary>(Re)create the sidebar name/badge fonts from the configured sidebar-font-size. Shared across
+    /// windows; called at startup and when the setting changes so it applies live.</summary>
+    private static void RebuildSidebarFonts()
+    {
+        float px = System.Math.Clamp(_config.SidebarFontSize, 9, 20);
+        _sidebarFont?.Dispose(); _sidebarSmall?.Dispose(); _sidebarCtx?.Dispose();
+        try { _sidebarEllipsis?.Dispose(); } catch { }
+        try { _sidebarCtxEllipsis?.Dispose(); } catch { }
+        _sidebarFont = NewChromeFormat("Segoe UI", px, center: false);
+        _sidebarSmall = NewChromeFormat("Segoe UI", System.Math.Max(9f, px - 1.5f), center: false);
+        // Trim over-long names with a "…" (esp. once the font is enlarged) so they never spill over the
+        // right-aligned status dot. Paired with DrawTextOptions.Clip at the draw sites.
+        _sidebarEllipsis = _dwrite.CreateEllipsisTrimmingSign(_sidebarFont);
+        _sidebarFont.SetTrimming(new Trimming { Granularity = TrimmingGranularity.Character }, _sidebarEllipsis);
+        // The context suffix gets the same treatment on its own format: a hard clip mid-glyph against
+        // the dot reads as a rendering accident, and _sidebarSmall (the counts) must stay untrimmed.
+        _sidebarCtx = NewChromeFormat("Segoe UI", System.Math.Max(9f, px - 1.5f), center: false);
+        _sidebarCtxEllipsis = _dwrite.CreateEllipsisTrimmingSign(_sidebarCtx);
+        _sidebarCtx.SetTrimming(new Trimming { Granularity = TrimmingGranularity.Character }, _sidebarCtxEllipsis);
+    }
+
+    private static IDWriteTextFormat NewChromeFormat(string family, float px, bool center)
+    {
+        IDWriteTextFormat f;
+        try { f = _dwrite.CreateTextFormat(family, null!, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, px); }
+        catch { f = _dwrite.CreateTextFormat("Segoe UI", null!, FontWeight.Normal, FontStyle.Normal, FontStretch.Normal, px); }
+        f.WordWrapping = WordWrapping.NoWrap;
+        f.TextAlignment = center ? TextAlignment.Center : TextAlignment.Leading;
+        f.ParagraphAlignment = ParagraphAlignment.Center; // vertically centre within the row rect
+        return f;
+    }
+
+    // ---- UIA control tree (fragment tree the reader scans/Tabs through) ----
+
+    private UiaRect ScreenRect(float x, float y, float w, float h)
+    {
+        var p = new POINT { x = (int)x, y = (int)y };
+        ClientToScreen(_hwnd, ref p);
+        return new UiaRect { Left = p.x, Top = p.y, Width = Math.Max(0, w), Height = Math.Max(0, h) };
+    }
+
+    /// <summary>Build the accessibility tree snapshot: root → [terminal, sidebar → session items], with
+    /// names, focus, and on-screen bounding rectangles. Runs on the UIA thread.</summary>
+    private Uia.TreeSnapshot BuildUiaTree()
+    {
+        var nodes = new List<Uia.Node> { new() { Kind = Uia.NodeKind.Root, Name = "WagTerm" } };
+
+        // Help is modal: only the help document is exposed while it's open, named with the full
+        // help text so a reader can read the whole guide via the element.
+        if (_helpOpen)
+        {
+            int doc = nodes.Count;
+            nodes.Add(new Uia.Node
+            {
+                Kind = Uia.NodeKind.HelpDoc,
+                Name = HelpText(),
+                Parent = 0,
+                Focused = true,
+                Rect = ScreenRect(_helpCard.Left, _helpCard.Top, _helpCard.Right - _helpCard.Left, _helpCard.Bottom - _helpCard.Top),
+            });
+            nodes[0].Children = new[] { doc };
+            return new Uia.TreeSnapshot { Nodes = nodes.ToArray() };
+        }
+
+        // Settings is modal: while it's open, expose ONLY the dialog (tabs + the current tab's
+        // controls) so a reader can't wander into the inert main-window elements behind it.
+        if (_setOpen)
+        {
+            int grp = nodes.Count;
+            nodes.Add(new Uia.Node
+            {
+                Kind = Uia.NodeKind.SettingsGroup,
+                Name = "Settings",
+                Parent = 0,
+                Rect = ScreenRect(_setCard.Left, _setCard.Top, _setCard.Right - _setCard.Left, _setCard.Bottom - _setCard.Top),
+            });
+            var gkids = new List<int>();
+            for (int i = 0; i < SetTabNames.Length; i++)   // tab items (invokable; current one marked)
+            {
+                gkids.Add(nodes.Count);
+                nodes.Add(new Uia.Node
+                {
+                    Kind = Uia.NodeKind.SettingsTab,
+                    Index = i,
+                    Parent = grp,
+                    Name = SetTabNames[i] + (i == _setTab ? " tab, selected" : " tab"),
+                    Selected = i == _setTab,
+                    Focused = _setNav == i,
+                    Rect = ScreenRect(_setCard.Left + 8f, _navHit[i * 2], SetNavW - 16f, _navHit[i * 2 + 1] - _navHit[i * 2]),
+                });
+            }
+            var srows = FocusableRows();
+            for (int i = 0; i < srows.Count; i++)
+            {
+                var r = srows[i];
+                gkids.Add(nodes.Count);
+                nodes.Add(new Uia.Node
+                {
+                    Kind = Uia.NodeKind.SettingsControl,
+                    Index = r.UiaIdentity,
+                    Parent = grp,
+                    Name = SettingsControlName(r),
+                    Focused = _setNav < 0 && ReferenceEquals(r, _setFocus),
+                    Rect = r.Vis ? ScreenRect(r.Hx0, r.Hy0, Math.Max(1, r.Hx1 - r.Hx0), Math.Max(1, r.Hy1 - r.Hy0)) : default,
+                });
+            }
+            nodes[grp].Children = gkids.ToArray();
+            nodes[0].Children = new[] { grp };
+            return new Uia.TreeSnapshot { Nodes = nodes.ToArray() };
+        }
+
+        int term = nodes.Count;
+        float contentBottom = ClientH() - FooterH;
+        nodes.Add(new Uia.Node
+        {
+            Kind = Uia.NodeKind.Terminal,
+            Name = "terminal",
+            Parent = 0,
+            Focused = !_chromeFocus && !_setOpen && _nativePick is null,
+            Rect = ScreenRect(_sidebarW, TitleBarH, ClientW() - _sidebarW, contentBottom - TitleBarH),
+        });
+
+        int list = nodes.Count;
+        bool sidebarShown = _sidebarW > 0;
+        nodes.Add(new Uia.Node
+        {
+            Kind = Uia.NodeKind.Sidebar,
+            Name = "Sessions",
+            Parent = 0,
+            Rect = sidebarShown ? ScreenRect(0, TitleBarH, _sidebarW, contentBottom - TitleBarH) : default,
+        });
+
+        // Map each session to its sidebar row rect (from the last render), for bounding rectangles.
+        var rowRect = new Dictionary<Ses, UiaRect>();
+        foreach (var (y0, y1, isWs, item) in _sidebarRows)
+            if (!isWs && item is Ses s && sidebarShown) rowRect[s] = ScreenRect(0, y0, _sidebarW, y1 - y0);
+
+        var sessions = AllSessions();
+        var kids = new List<int>();
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            var s = sessions[i];
+            kids.Add(nodes.Count);
+            nodes.Add(new Uia.Node
+            {
+                Kind = Uia.NodeKind.Session,
+                Index = s.UiaIdentity,
+                Name = s.Panes.Count == 1 && s.ActivePane.ProfileExitCode is int exitCode
+                    ? $"{s.Name}, session ended (exit {exitCode})" : s.Name,
+                Parent = list,
+                Focused = _chromeFocus && ReferenceEquals(_focusRow, s),
+                Selected = ReferenceEquals(_active, s),
+                Rect = rowRect.TryGetValue(s, out var r) ? r : default,
+            });
+        }
+        nodes[list].Children = kids.ToArray();
+
+        var rootKids = new List<int> { term, list };
+        // Chrome buttons (title bar + footer) as invokable Button elements.
+        var btns = ChromeButtonsForUia();
+        for (int i = 0; i < btns.Count; i++)
+        {
+            rootKids.Add(nodes.Count);
+            nodes.Add(new Uia.Node { Kind = Uia.NodeKind.ChromeButton, Index = ChromeUiaIdentity(btns[i].action), Name = btns[i].label, Parent = 0, Rect = btns[i].rect });
+        }
+        AddMenuBarUiaNodes(nodes, rootKids);   // the title bar's menu bar, with its open dropdown (MenuBar.cs)
+        nodes[0].Children = rootKids.ToArray();
+        return new Uia.TreeSnapshot { Nodes = nodes.ToArray() };
+    }
+
+    private readonly Dictionary<string, int> _chromeUiaIdentities = new(StringComparer.Ordinal);
+    private int ChromeUiaIdentity(string action)
+    {
+        if (!_chromeUiaIdentities.TryGetValue(action, out int identity))
+            _chromeUiaIdentities.Add(action, identity = _chromeUiaIdentities.Count + 1);
+        return identity;
+    }
+
+    /// <summary>Title-bar + footer chrome buttons as (action, spoken label, screen rect) for the UIA tree.</summary>
+    private List<(string action, string label, UiaRect rect)> ChromeButtonsForUia()
+    {
+        var list = new List<(string, string, UiaRect)>();
+        foreach (var (x0, x1, action) in _titleButtons)
+        {
+            if (action.StartsWith(MenuIdPrefix, StringComparison.Ordinal)) continue;   // the bar's labels are MenuItems of the MenuBar element
+            list.Add((action, ChromeButtonLabel(action), ScreenRect(x0, 0, x1 - x0, TitleBarH)));
+        }
+        float fy = ClientH() - FooterH;
+        foreach (var (x0, x1, action) in _footerButtons)
+            list.Add((action, ChromeButtonLabel(action), ScreenRect(x0, fy, x1 - x0, FooterH)));
+        return list;
+    }
+
+    private string SettingsControlName(SetRow r)
+    {
+        if (r.Kind == SW.Button) return r.Label;
+        string val = r.Kind switch
+        {
+            SW.Toggle => IsOn(ConfigValue(r.Key)) ? "on" : "off",
+            SW.Slider => ConfigValue(r.Key),
+            SW.Dropdown or SW.Sound => CurrentDropdownText(r),
+            SW.Path => ConfigValue(r.Key) is { Length: > 0 } p ? p : "not set",
+            SW.Profile => string.Equals(r.Key, _profileCfg.Default, StringComparison.OrdinalIgnoreCase) ? "default" : "not default",
+            _ => "",
+        };
+        return val.Length > 0 ? $"{r.Label}, {val}" : r.Label;
+    }
+
+    /// <summary>UIA Invoke on a button/control — run the same action a click/keypress would.</summary>
+    private void HandleUiaInvoke(Uia.NodeKind kind, int index)
+    {
+        if (_nativePick is not null) return;
+        // Revalidate after the UI-thread queue hop, including modal visibility. A retained element
+        // must never target a different action merely because the current controls were reordered.
+        if (Uia.Find(BuildUiaTree(), kind, index) is null) return;
+        if (kind == Uia.NodeKind.ChromeButton)
+        {
+            var b = ChromeButtonsForUia();
+            var action = b.FirstOrDefault(button => ChromeUiaIdentity(button.action) == index).action;
+            if (action is not null) ChromeAction(action);
+        }
+        else if (kind == Uia.NodeKind.MenuItem) MenuUiaInvoke(index);
+        else if (kind == Uia.NodeKind.SettingsControl && _setOpen)
+        {
+            var row = FocusableRows().FirstOrDefault(r => r.UiaIdentity == index);
+            if (row is not null) { _setFocus = row; ActivateSetFocus(); }
+        }
+        else if (kind == Uia.NodeKind.SettingsTab && _setOpen && index >= 0 && index < SetTabNames.Length)
+        {
+            _setTab = index; _setScroll = 0;
+            _setFocus = FocusableRows().FirstOrDefault();
+            _uia.Announce($"{SetTabNames[index]} tab");
+            RequestRedraw();
+        }
+    }
+
+    /// <summary>A UIA client (or Narrator) called SetFocus on a tree element — move our internal focus.</summary>
+    private void HandleUiaSetFocus(Uia.NodeKind kind, int index)
+    {
+        if (_nativePick is not null) { _nativePick.FocusIfForeground(); return; }
+        if (Uia.Find(BuildUiaTree(), kind, index) is null) return;
+        switch (kind)
+        {
+            case Uia.NodeKind.Terminal: ExitChromeFocus(announce: false); break;
+            case Uia.NodeKind.Sidebar: EnterChromeFocus(); break;
+            case Uia.NodeKind.MenuItem: if (index < 100 && MenuBarUsable) FocusMenuBar(index); break;
+            case Uia.NodeKind.SettingsControl:
+                var row = FocusableRows().FirstOrDefault(r => r.UiaIdentity == index);
+                if (_setOpen && row is not null) { _setNav = -1; _setFocus = row; _setFocusKb = true; AfterSetFocus(); }
+                break;
+            case Uia.NodeKind.SettingsTab:
+                if (_setOpen && index >= 0 && index < SetTabNames.Length) { _setNav = index; _setFocusKb = true; AfterHeaderFocus(); }
+                break;
+            case Uia.NodeKind.Session:
+                var session = AllSessions().FirstOrDefault(s => s.UiaIdentity == index);
+                if (session is not null)
+                {
+                    if (_sidebarW <= 0) ToggleSidebar();
+                    _chromeFocus = true; _focusRow = session; RequestRedraw();
+                }
+                break;
+        }
+    }
+
+    private void RaiseUiaFocusForRow()
+    {
+        if (_focusRow is null) return;
+        if (AllSessions().Contains(_focusRow)) _uia.RaiseFocus(Uia.NodeKind.Session, _focusRow.UiaIdentity);
+    }
+
+    /// <summary>Build the UIA text-pattern snapshot: the active pane's buffer (recent scrollback + the
+    /// live screen) flattened into one document, with the caret offset and the mapping from document
+    /// lines to on-screen rows (screen px) so ranges can report bounding rectangles. Runs on this
+    /// window's UI thread; locks the session while copying terminal data.</summary>
+    private Uia.TextSnapshot? BuildUiaTextSnapshot()
+    {
+        // The one seam: a shown cover, else the focused pane's SURFACE — its overlay term while a pane
+        // overlay is open (P5), else the pane. The reader follows whatever the keyboard reaches.
+        var p = ActiveSurface();
+        if (p is null) return null;
+        var (oxC, oyC, cw, ch) = ActivePaneView();
+        var origin = new POINT { x = (int)oxC, y = (int)oyC };
+        ClientToScreen(_hwnd, ref origin);   // bounding rectangles are screen coords
+        lock (p.S.SyncRoot)
+        {
+            var em = p.S.Emulator;
+            int hist = em.HistoryCount, rows = em.Screen.Rows;
+            const int MaxHist = 2000;                       // bound the document the reader walks
+            int keepHist = Math.Min(hist, MaxHist);
+            int histStart = hist - keepHist;
+            int n = keepHist + rows;
+            var lines = new string[n];
+            for (int i = 0; i < keepHist; i++) lines[i] = em.DumpHistoryRow(histStart + i);
+            for (int r = 0; r < rows; r++) lines[keepHist + r] = em.DumpRow(r);
+            var starts = new int[n + 1];
+            for (int i = 0; i < n; i++) starts[i + 1] = starts[i] + lines[i].Length + 1;   // +1 = '\n' joiner
+            int total = n > 0 ? starts[n] - 1 : 0;          // no trailing newline after the last line
+
+            int caretLine = keepHist + Math.Clamp(em.CursorRow, 0, rows - 1);
+            int caretCol = Math.Min(em.CursorCol, lines[caretLine].Length);
+            int caretOff = starts[caretLine] + caretCol;
+
+            int off = em.IsAltScreen ? 0 : Math.Clamp(p.ScrollOffset, 0, hist);
+            int firstVisibleDoc = (hist - off) - histStart;  // Lines[] index of the top on-screen row
+
+            return new Uia.TextSnapshot
+            {
+                Lines = lines,
+                LineStart = starts,
+                TotalLength = total,
+                CaretOffset = caretOff,
+                FirstVisibleLine = firstVisibleDoc,
+                VisibleRows = rows,
+                ScreenX = origin.x,
+                ScreenY = origin.y,
+                CellW = cw,
+                CellH = ch,
+            };
+        }
+    }
+
+    // ---- Focus zones (F6): move keyboard focus between the terminal and the sidebar ----
+    // The terminal owns the keyboard by default (everything goes to the shell). F6 lifts focus OUT
+    // to the sidebar so it can be walked without the mouse — the accessible way to leave the terminal.
+    private bool _chromeFocus;    // keyboard focus is in the sidebar zone (not the terminal)
+    private Ses? _focusRow;       // the focused sidebar session while _chromeFocus
+
+    private void EnterChromeFocus()
+    {
+        if (_sidebarW <= 0) ToggleSidebar();   // reveal the sidebar so the focus ring is visible
+        _chromeFocus = true;
+        _focusRow = _active ?? AllSessions().FirstOrDefault();
+        _uia.Announce("Sidebar");
+        AnnounceFocusRow();
+        RequestRedraw();
+    }
+
+    private void ExitChromeFocus(bool announce = true)
+    {
+        if (!_chromeFocus) return;
+        _chromeFocus = false;
+        if (announce) { _uia.Announce("Terminal"); _uia.RaiseFocus(Uia.NodeKind.Terminal, 0); }
+        RequestRedraw();
+    }
+
+    private void AnnounceFocusRow()
+    {
+        if (_focusRow is null) return;
+        ShowToast(_focusRow.Name);   // a visible hint alongside the spoken one
+        RaiseUiaFocusForRow();       // move UIA focus to this element (Narrator announces it)
+        bool current = ReferenceEquals(_focusRow, _active);
+        int unread = UnreadOf(_focusRow);
+        string extra = (current ? ", current" : "") + (unread > 0 ? $", {unread} unread" : "");
+        _uia.Announce($"{_focusRow.Name}, session{extra}");
+    }
+
+    /// <summary>Keyboard handling while the sidebar zone has focus (F6). Up/Down walk sessions, Enter/Space
+    /// opens one, Escape/F6 returns to the terminal. Swallows everything else so it can't reach the shell.</summary>
+    private bool SidebarZoneKey(int vk)
+    {
+        var list = AllSessions();
+        if (list.Count == 0) { ExitChromeFocus(); return true; }
+        int idx = _focusRow is not null ? list.IndexOf(_focusRow) : 0;
+        if (idx < 0) idx = 0;
+        switch (vk)
+        {
+            case VK_DOWN: _focusRow = list[Math.Min(idx + 1, list.Count - 1)]; AnnounceFocusRow(); RequestRedraw(); return true;
+            case VK_UP: _focusRow = list[Math.Max(idx - 1, 0)]; AnnounceFocusRow(); RequestRedraw(); return true;
+            case VK_HOME: _focusRow = list[0]; AnnounceFocusRow(); RequestRedraw(); return true;
+            case VK_END: _focusRow = list[^1]; AnnounceFocusRow(); RequestRedraw(); return true;
+            case VK_RETURN:
+            case VK_SPACE:
+                if (_focusRow is not null) SetActive(_focusRow);
+                ExitChromeFocus();
+                return true;
+            case VK_ESCAPE: case 0x75 /* F6 */: ExitChromeFocus(); return true;
+        }
+        return true;
+    }
+
+    // ---- System caret (accessibility: Magnifier follow, IME placement, screen-reader caret) ----
+    // We render our own cursor, so the system caret is created HIDDEN — it exists only so assistive
+    // tech can read the text-cursor position (via GetCaretPos / the caret's location-change events).
+    private bool _caretOwned;
+
+    private void EnsureCaret()
+    {
+        if (_caretOwned || _hwnd == IntPtr.Zero) return;
+        var (_, _, cw, ch) = ActivePaneView();
+        if (CreateCaret(_hwnd, IntPtr.Zero, Math.Max(1, (int)cw), Math.Max(1, (int)ch)))
+        {
+            _caretOwned = true;
+            HideCaret(_hwnd);   // don't double-draw over our rendered cursor
+            UpdateCaretPos();
+        }
+    }
+
+    private void DropCaret()
+    {
+        if (!_caretOwned) return;
+        DestroyCaret();
+        _caretOwned = false;
+    }
+
+    /// <summary>Move the hidden system caret onto the active pane's text cursor (client px).</summary>
+    private void UpdateCaretPos()
+    {
+        if (!_caretOwned || ActiveSurface() is null) return;
+        var (ox, oy, cw, ch) = ActivePaneView();
+        var p = ActiveSurface();
+        if (p is null) return;
+        int col, row;
+        lock (p.S.SyncRoot) { col = p.S.Emulator.CursorCol; row = p.S.Emulator.CursorRow; }
+        SetCaretPos((int)(ox + col * cw), (int)(oy + row * ch));
+    }
+
+    /// <summary>Apply a font-family / default-font-size change live: rebuild the base format, dispose and
+    /// clear the per-size metrics cache (each entry bakes in the family), remeasure, and reflow every
+    /// session so the change is visible immediately instead of only on new sessions.</summary>
+    private void RebuildFont()
+    {
+        var old = _format;
+        _format = CreateTextFormat(_config);
+        ResolveFamilyFont();
+        try { old?.Dispose(); } catch { }
+        foreach (var m in _metrics.Values) { try { m.Fmt.Dispose(); } catch { } }   // COM formats — dispose before dropping
+        _metrics.Clear();
+        foreach (var f in _styledFmt.Values) { try { f.Dispose(); } catch { } }     // bold/italic variants bake in the family too
+        _styledFmt.Clear();
+        // Formats/metrics are process-wide; every open window must adopt their new geometry.
+        // Quick is not part of the persisted library-window index.
+        List<Program> windows;
+        lock (_windowIndex) windows = _byId.Values.ToList();
+        if (!windows.Contains(this)) windows.Add(this);
+        if (_quickHost is { } quick && !windows.Contains(quick)) windows.Add(quick);
+        foreach (var window in windows)
+        {
+            if (window._hwnd == IntPtr.Zero) continue;
+            var surfaces = new HashSet<Pane>();
+            foreach (var session in window.AllSessions())
+            {
+                foreach (var pane in session.Panes)
+                { surfaces.Add(pane); if (pane.Overlay.Term is { } overlay) surfaces.Add(overlay); }
+                if (session.Scratch is { } scratch) surfaces.Add(scratch);
+                if (session.Overlay.Term is { } sessionOverlay) surfaces.Add(sessionOverlay);
+            }
+            if (window._quick is { } quickPane) surfaces.Add(quickPane);
+            if (window._cover is { } cover) surfaces.Add(cover);
+            foreach (var surface in surfaces)
+                if (!surface.FontZoomed) surface.FontSize = (float)_config.FontSize;
+            window.MeasureCell();
+            foreach (var session in window.AllSessions()) window.RegridSession(session);
+            if (window._cover is not null) window.RegridCover();
+            if (_fontFallbackNote is { } note) window.ShowToast(note, 8000);
+            window.RequestRedraw();
+        }
+    }
+
+    private void MeasureCell()
+    {
+        using var run = _dwrite.CreateTextLayout(new string('M', 10), _format, 4096f, 4096f);
+        using var one = _dwrite.CreateTextLayout("M", _format, 4096f, 4096f);
+        // Use the font's exact advance (do NOT round): text is drawn a run at a time, so the
+        // glyph advance must equal the grid step or long runs (e.g. horizontal box-drawing
+        // borders) drift off the per-column grid and stop meeting the vertical borders.
+        _cellW = run.Metrics.Width / 10f;
+        _cellH = MathF.Round(one.Metrics.Height);
+        if (_cellW < 1) _cellW = 8;
+        if (_cellH < 1) _cellH = 16;
+    }
+
+    // Per-font-size terminal metrics (text format + cell size), built on demand and cached.
+    // The chrome (sidebar/title bar) keeps the base _cellW/_cellH/_format; only the terminal
+    // content region scales with the ACTIVE session's font zoom.
+    private static readonly Dictionary<float, (IDWriteTextFormat Fmt, float CellW, float CellH)> _metrics = new();
+
+    private static (IDWriteTextFormat Fmt, float CellW, float CellH) Metrics(float px)
+    {
+        if (_metrics.TryGetValue(px, out var m)) return m;
+        IDWriteTextFormat fmt;
+        fmt = NewFormat(_terminalFontFamily, px);
+        using var run = _dwrite.CreateTextLayout(new string('M', 10), fmt, 4096f, 4096f);
+        using var one = _dwrite.CreateTextLayout("M", fmt, 4096f, 4096f);
+        float cw = run.Metrics.Width / 10f, ch = MathF.Round(one.Metrics.Height);
+        if (cw < 1) cw = 8;
+        if (ch < 1) ch = 16;
+        m = (fmt, cw, ch);
+        _metrics[px] = m;
+        return m;
+    }
+
+    private float ActiveFontSize() => _active is { FontSize: > 0 } a ? a.FontSize : (float)_config.FontSize;
+    private (IDWriteTextFormat Fmt, float CellW, float CellH) CurrentMetrics() => Metrics(ActiveFontSize());
+
+    private void CreateRenderTarget()
+    {
+        GetClientRect(_hwnd, out RECT rc);
+        int w = Math.Max(1, rc.right - rc.left);
+        int h = Math.Max(1, rc.bottom - rc.top);
+
+        // The window's real DPI, not 96: this is what makes every coordinate we pass a DIP, so the
+        // chrome's pixel literals and the configured font size come out the right PHYSICAL size on
+        // any monitor. PixelSize stays in device pixels — that is the surface, not the coordinate space.
+        _dpi = GetDpiForWindow(_hwnd) is var d && d > 0 ? d : 96f;
+        // Test seam: force a scaling without a second monitor. Per-monitor DPI is otherwise only
+        // reachable with hardware, which is how this went unimplemented for so long.
+        if (Environment.GetEnvironmentVariable("WAGTERM_DPI_OVERRIDE") is { Length: > 0 } dpiEnv
+            && float.TryParse(dpiEnv, out var forced) && forced >= 72f && forced <= 480f)
+            _dpi = forced;
+        var props = new RenderTargetProperties
+        {
+            Type = RenderTargetType.Default,
+            PixelFormat = new PixelFormat(Vortice.DXGI.Format.B8G8R8A8_UNorm, Vortice.DCommon.AlphaMode.Ignore),
+            DpiX = _dpi,
+            DpiY = _dpi,
+        };
+        var hwndProps = new HwndRenderTargetProperties
+        {
+            Hwnd = _hwnd,
+            PixelSize = new SizeI(w, h),
+            PresentOptions = PresentOptions.None,
+        };
+        _rt = _d2d.CreateHwndRenderTarget(props, hwndProps);
+        // Set it again on the created target: the DPI passed in RenderTargetProperties did not stick
+        // (the grid scaled because ClientW/H are DIPs, but glyphs and chrome still drew at 1:1), and
+        // a half-scaled UI is worse than an unscaled one.
+        _rt.Dpi = new Vortice.Mathematics.Size(_dpi, _dpi);
+        // Grayscale AA (like Windows Terminal): glyphs sit at fractional x on the grid, and
+        // ClearType would fringe vertical strokes (e.g. box-drawing borders) with colour.
+        _rt.TextAntialiasMode = Vortice.Direct2D1.TextAntialiasMode.Grayscale;
+        _brush = _rt.CreateSolidColorBrush(new Color4(1f, 1f, 1f, 1f));
+    }
+
+    /// <summary>Grid size for the content region using the given font size's cell metrics.</summary>
+    private (int cols, int rows) GridSizeFor(float px)
+    {
+        var (_, cw, ch) = Metrics(px);
+        GetClientRect(_hwnd, out RECT rc);
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        int cols = Math.Max(1, (int)((w - _sidebarW - 2 * PadX) / cw));
+        int rows = Math.Max(1, (int)((h - TitleBarH - 2 * PadY) / ch));
+        return (cols, rows);
+    }
+
+    private (int cols, int rows) GridSize() => GridSizeFor(ActiveFontSize());
+
+    private readonly Uia _uia = new();
+    private readonly int _uiaThreadId = Environment.CurrentManagedThreadId;
+
+    // UIA may call back synchronously while the UI thread raises an accessibility event.
+    // Queue only foreign-thread reads; queueing and waiting on ourselves would deadlock.
+    private T ReadUia<T>(Func<T> read)
+    {
+        try { return Environment.CurrentManagedThreadId == _uiaThreadId ? read() : InvokeOnUiQueued(read); }
+        catch (Exception) when (_uia.IsClosed || _uiGone.IsCancellationRequested)
+        {
+            throw new COMException("The accessibility window is closed.", unchecked((int)0x80040201));
+        }
+    }
+
+    private void ConfigureUia()
+    {
+        _uia.GetVisibleText = () => ReadUia(() =>
+        {
+            _uia.EnsureAlive();
+            var p = ActiveSurface();
+            if (p is null) return "terminal";
+            lock (p.S.SyncRoot)
+            {
+                var em = p.S.Emulator; var sb = new StringBuilder();
+                for (int r = 0; r < em.Screen.Rows; r++) sb.Append(em.DumpRow(r)).Append('\n');
+                return sb.ToString().TrimEnd() is { Length: > 0 } t ? t : "terminal";
+            }
+        });
+        _uia.GetTextSnapshot = () => ReadUia(() => { _uia.EnsureAlive(); return BuildUiaTextSnapshot(); });
+        _uia.GetTree = () => ReadUia(() => { _uia.EnsureAlive(); return BuildUiaTree(); });
+        _uia.OnSetFocus = (kind, index) => Post(() => { if (!_uia.IsClosed) HandleUiaSetFocus(kind, index); });
+        _uia.OnInvoke = (kind, index) => Post(() => { if (!_uia.IsClosed) HandleUiaInvoke(kind, index); });
+    }
+
+    private void StartSession()
+    {
+        // One control server for the whole app (one pipe); it resolves --window through the library.
+        if (_control is null)
+        {
+            _control = new ControlServer(this, this, _argPipe ?? _appId);
+            _control.Start();
+            // Keep already-installed profile blocks current (fixes ship with the app but the blocks
+            // live in the user's profile). Refresh-only: never installs fresh, best-effort.
+            _ = Task.Run(() =>
+            {
+                Wagterm.Pty.ClaudeIntegration.RefreshIfInstalled();
+                Wagterm.Pty.GenericAgentInstaller.RefreshIfInstalled();
+            });
+            // Update awareness (Claude Code + wagterm itself): startup + every 12h, quiet on
+            // failure/offline. Knobs are re-read every cycle so `config set ...-check` applies
+            // without a restart. Also sweep leftovers of a previously applied self-update.
+            _ = Task.Run(async () =>
+            {
+                CleanupUpdateLeftovers();
+                while (true)
+                {
+                    if (_config.ClaudeUpdateCheck) await CheckClaudeUpdateOnce();
+                    if (_config.UpdateCheck) await CheckAppUpdateOnce();
+                    await Task.Delay(TimeSpan.FromHours(12));
+                }
+            });
+            // Default-terminal handoff (T2-13): register the COM class factory so conhost can hand
+            // console sessions to this instance. Each handoff opens a new attached session.
+            DefTerm.OnHandoff = args => Post(() =>
+                CreateSession(Guid.NewGuid().ToString(), null, null, ActiveWorkspace(), makeActive: true, handoff: args));
+            // Dev builds don't register as the default-terminal COM server — that CLSID is owned by the
+            // installed release, and a dev instance must not intercept the OS's console handoffs.
+            if (!IsDev) { try { DefTerm.RegisterServer(); } catch { /* defterm not registered / unsupported */ } }
+        }
+        // CLI args (first window only; consumed so extra windows don't re-apply them).
+        string? argProfile = _argProfile, argDir = _argDir;
+        _argProfile = null; _argDir = null;
+
+        // --no-restore (elevated relaunch): a fresh window with just the requested profile, no tree reopen.
+        if (!_argNoRestore && TryRestoreState())
+        {
+            // Restored: an explicit -p/-d still means "and open me this session".
+            if (argProfile is not null || argDir is not null)
+                CreateSession(Guid.NewGuid().ToString(), null, argDir, ActiveWorkspace(), makeActive: true, profileName: argProfile);
+            return;
+        }
+        var ws = CreateWorkspace(Guid.NewGuid().ToString(), null);
+        CreateSession(Guid.NewGuid().ToString(), null, argDir, ws, makeActive: true, profileName: argProfile);
+    }
+}

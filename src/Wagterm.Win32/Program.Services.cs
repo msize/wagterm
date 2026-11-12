@@ -1,0 +1,1995 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using Wagterm.Core;
+using Wagterm.Pty;
+using SharpGen.Runtime;
+using Vortice.Direct2D1;
+using Vortice.DirectWrite;
+using Vortice.DCommon;
+using Vortice.Mathematics;
+using static Wagterm.Win32.Win32;
+using Color = Wagterm.Core.Color;
+
+namespace Wagterm.Win32;
+
+/// <summary>Services: notifications, taskbar progress, config, theming, omp, persistence, fullscreen.</summary>
+internal partial class Program
+{
+    // ---- Screen-reader output announcements (UIA notification events; T2-14 Stage 1.5) ----
+
+    /// <summary>Speak the active pane's NEW output since the last announcement (debounced via
+    /// UiaAnnounceTimer; only runs while a UIA client listens). Tracks an absolute buffer line
+    /// (history + cursor row) per pane; the delta rows are read as plain text. Alt-screen apps
+    /// (full-screen TUIs redrawing in place) are skipped — line diffs there are meaningless.</summary>
+    private void AnnounceNewOutput()
+    {
+        if (!Uia.ClientsListening) return;
+        var p = ActiveSurface();
+        if (p is null) return;
+        string text;
+        lock (p.S.SyncRoot)
+        {
+            var em = p.S.Emulator;
+            if (em.IsAltScreen) { p.UiaAnnouncedAbs = -1; return; }
+            int curAbs = em.HistoryCount + em.CursorRow;
+            int prev = p.UiaAnnouncedAbs;
+            p.UiaAnnouncedAbs = curAbs;
+            if (prev < 0 || prev >= curAbs) return;             // first sight / scroll trim — set baseline only
+            int lines = Math.Min(curAbs - prev, 40);            // cap floods; the reader can't keep up anyway
+            var sb = new StringBuilder();
+            for (int abs = curAbs - lines; abs < curAbs; abs++)
+            {
+                string row = abs < em.HistoryCount ? em.DumpHistoryRow(abs) : em.DumpRow(abs - em.HistoryCount);
+                if (row.Length > 0) sb.Append(row).Append('\n');
+            }
+            text = sb.ToString();
+        }
+        _uia.RaiseTextChanged();   // let the reader's text model re-read (navigation)
+        _uia.Announce(text);       // and speak the new lines directly (reliable across readers)
+    }
+
+    // ---- Notifications (OSC 9 / OSC 777 / notify) ----
+
+    /// <summary>Find the session that owns a pane (any pane, a pane's overlay term (P5), its scratch, or its
+    /// session-wide overlay; or the quick cover).</summary>
+    private Ses? OwningSes(Pane p)
+    {
+        lock (_workspaces)
+            foreach (var w in _workspaces)
+                foreach (var s in w.Sessions)
+                {
+                    if (ReferenceEquals(s.Scratch, p) || ReferenceEquals(s.Overlay.Term, p)) return s;
+                    foreach (var q in s.Panes)
+                        if (ReferenceEquals(q, p) || ReferenceEquals(q.Overlay.Term, p)) return s;
+                }
+        return null;
+    }
+
+    /// <summary>A pane raised a desktop notification. Runs on the UI thread (marshaled from the pump).</summary>
+    private void OnNotified(Pane p, string title, string body, NotificationCategory category = NotificationCategory.Attention)
+    {
+        var ses = OwningSes(p);
+        // Count it against the session unless you're looking at that pane right now (app focused AND it's
+        // the active surface). If the app is in the background, even the active pane accrues a badge — which
+        // then clears on refocus (agterm #164).
+        if (!ReferenceEquals(p, ActiveSurface()) || !_windowActive)
+        {
+            p.Unread++;
+            p.UnreadCategory = NotificationCategories.Highest(p.UnreadCategory, category);
+        }
+        string label = string.IsNullOrEmpty(title) ? body : $"{title}: {body}";
+        _toastText = label.Length == 0 ? "(notification)" : label;
+        _toastTarget = ses;                       // clicking the banner jumps to the raising session
+        SetTimer(_hwnd, (IntPtr)2, 4000, IntPtr.Zero);
+        PlayNotificationSound();                  // opt-in sound on banner delivery (agterm #232)
+        EmitEvent("notification", p.Id, _toastText);   // control-API event log (#273)
+        if (_config.DesktopNotifications) TrayNotify(title, body);
+        // Background notification → taskbar flash (agterm's opt-in Dock bounce, #215).
+        if (!_windowActive && _config.NotificationFlash != "none")
+        {
+            var fw = new FLASHWINFO
+            {
+                cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<FLASHWINFO>(),
+                hwnd = _hwnd,
+                // once: a brief tray+caption blink; until-focused: keep flashing until the window is foregrounded.
+                dwFlags = _config.NotificationFlash == "once" ? FLASHW_ALL : FLASHW_ALL | FLASHW_TIMERNOFG,
+                uCount = _config.NotificationFlash == "once" ? 2u : 0u,
+            };
+            FlashWindowEx(ref fw);
+        }
+        RequestRedraw();
+    }
+
+    /// <summary>The terminal bell (BEL, 0x07): beep and/or flash per the `bell` config. A BEL flood
+    /// (e.g. `yes` piping bells) coalesces into one ring; the visual flash only shows for an on-screen
+    /// pane. Called on the UI thread via Post from the pane's host.</summary>
+    private void RingBell(Pane pane)
+    {
+        long now = Environment.TickCount64;
+        if (now - _lastBellTick < 120) return;   // coalesce a rapid BEL flood into a single ring
+        _lastBellTick = now;
+        string mode = _config.Bell;
+        if (mode is "audible" or "both") MessageBeep(MB_OK);
+        if ((mode is "visual" or "both") && IsSurfaceVisible(pane))
+        {
+            _bellFlashUntil = now + 100;                                  // ~100 ms flash
+            SetTimer(_hwnd, (IntPtr)BellFlashTimer, 120, IntPtr.Zero);    // repaint to clear it
+            RequestRedraw();
+        }
+    }
+
+    /// <summary>Total unread notifications across a session's panes (for the sidebar badge).</summary>
+    private static int UnreadOf(Ses s) { int n = 0; foreach (var p in s.Panes) n += p.Unread; return n; }
+
+    private static NotificationCategory UnreadCategoryOf(Ses s)
+    {
+        var category = NotificationCategory.Ok;
+        foreach (var p in s.Panes)
+            if (p.Unread > 0) category = NotificationCategories.Highest(category, p.UnreadCategory);
+        return category;
+    }
+
+    /// <summary>Session status for display: the most attention-worthy status across ALL panes
+    /// (Blocked &gt; Completed &gt; Active &gt; Idle) — a background pane's state must not be invisible.</summary>
+    private static AgentStatus AggStatus(Ses s) => StatusAggregate.Winner(s.Panes.Select(p => p.S));
+
+    /// <summary><see cref="AggStatus"/> together with the epoch seconds of the last status write on
+    /// the pane that won it, from one pass — so the tree's age describes the status the tree actually
+    /// reports, not some other pane's, even when a hook writes between the two reads. Where several
+    /// panes tie at the winning severity the most recent wins.</summary>
+    private static (AgentStatus Status, long ChangedAt) AggStatusAndAt(Ses s)
+        => StatusAggregate.WinnerAndChangedAt(s.Panes.Select(p => p.S));
+
+    /// <summary>True if any pane of the session has an attention-worthy status with blink set.</summary>
+    private static bool AggBlink(Ses s)
+    {
+        foreach (var p in s.Panes)
+            if (p.S.Blink && p.S.Status is AgentStatus.Blocked or AgentStatus.Active or AgentStatus.Completed) return true;
+        return false;
+    }
+
+    // Visiting a session clears every surface it shows: each pane, each pane's overlay term (P5 — like the
+    // session-wide overlay, counted on the term and cleared here, not summed into UnreadOf), scratch, overlay.
+    private static void ClearUnread(Ses s)
+    {
+        foreach (var p in s.Panes)
+        {
+            p.Unread = 0;
+            p.UnreadCategory = NotificationCategory.Ok;
+            if (p.Overlay.Term is { } po) { po.Unread = 0; po.UnreadCategory = NotificationCategory.Ok; }
+        }
+        if (s.Scratch is not null) { s.Scratch.Unread = 0; s.Scratch.UnreadCategory = NotificationCategory.Ok; }
+        if (s.Overlay.Term is { } ov) { ov.Unread = 0; ov.UnreadCategory = NotificationCategory.Ok; }
+    }
+
+    // ---- Taskbar progress (OSC 9;4, ConEmu/Windows Terminal convention) ----
+    // Last-writer-wins across sessions: the most recent report drives the window's taskbar icon.
+    private ITaskbarList3? _taskbar;
+
+    private void OnProgress(int state, int value)
+    {
+        try
+        {
+            if (_taskbar is null)
+            {
+                _taskbar = (ITaskbarList3)new TaskbarListCom();
+                _taskbar.HrInit();
+            }
+            int flags = state switch { 1 => TBPF_NORMAL, 2 => TBPF_ERROR, 3 => TBPF_INDETERMINATE, 4 => TBPF_PAUSED, _ => TBPF_NOPROGRESS };
+            _taskbar.SetProgressState(_hwnd, flags);
+            if (flags is TBPF_NORMAL or TBPF_ERROR or TBPF_PAUSED)
+                _taskbar.SetProgressValue(_hwnd, (ulong)value, 100);
+        }
+        catch { /* taskbar progress is cosmetic */ }
+    }
+
+    /// <summary>Show an OS desktop notification via a Shell_NotifyIcon tray balloon (no AUMID/shortcut needed).</summary>
+    private void TrayNotify(string title, string body)
+    {
+        try
+        {
+            var d = new NOTIFYICONDATAW
+            {
+                cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NOTIFYICONDATAW>(),
+                hWnd = _hwnd,
+                uID = 1,
+                uFlags = NIF_INFO | (_trayAdded ? 0u : (NIF_ICON | NIF_TIP)),
+                hIcon = _trayAdded ? IntPtr.Zero : (_hIconTray != IntPtr.Zero ? _hIconTray : LoadIconW(IntPtr.Zero, (IntPtr)32512)), // app icon, else IDI_APPLICATION
+            szTip = DisplayName,
+            szInfoTitle = string.IsNullOrEmpty(title) ? DisplayName : title,
+                szInfo = body.Length == 0 ? " " : body,
+                dwInfoFlags = 0,
+            };
+            if (!_trayAdded) { _trayAdded = Shell_NotifyIconW(NIM_ADD, ref d); }
+            Shell_NotifyIconW(NIM_MODIFY, ref d);
+        }
+        catch { /* balloon is best-effort; the in-app banner + badge are the reliable surface */ }
+    }
+
+    private void RemoveTrayIcon()
+    {
+        if (!_trayAdded) return;
+        try { var d = new NOTIFYICONDATAW { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NOTIFYICONDATAW>(), hWnd = _hwnd, uID = 1 }; Shell_NotifyIconW(NIM_DELETE, ref d); } catch { }
+        _trayAdded = false;
+    }
+
+    private static string SafeCwd(Ses s) { lock (s.S.SyncRoot) return s.S.Emulator.Cwd; }
+    private static string SafeCwd(Pane p) { lock (p.S.SyncRoot) return p.S.Emulator.Cwd; }
+
+    /// <summary>An existing directory for a session's "current" dir: live OSC-7 cwd if valid, else its launch dir.</summary>
+    private static string? CurrentDirOf(Ses s)
+    {
+        var live = SafeCwd(s);
+        if (!string.IsNullOrWhiteSpace(live)) { var p = PrettyCwd(live); if (Directory.Exists(p)) return p; }
+        return s.ActivePane.StartCwd;
+    }
+
+    /// <summary>The path used as a session's title-bar label when no custom name or program title
+    /// takes precedence (<see cref="SessionDisplayName"/>): live OSC 7 cwd if the shell reports it,
+    /// else the pane's launch dir, else the process cwd — so the fallback is a real path, out of the box.</summary>
+    private static string TitleCwd(Ses s)
+    {
+        string live = SafeCwd(s);
+        if (!string.IsNullOrWhiteSpace(live)) return PrettyCwd(live);
+        string? start = s.ActivePane.StartCwd;
+        return string.IsNullOrWhiteSpace(start) ? Environment.CurrentDirectory : start!;
+    }
+
+    /// <summary>Title-bar display name (agterm precedence): custom name → program OSC title → cwd basename → app name.</summary>
+    private static string SessionDisplayName(Ses s)
+    {
+        if (!string.IsNullOrWhiteSpace(s.CustomName)) return s.CustomName!;
+        // A program's OSC title (e.g. "claude") — but ignore the shell's default console title,
+        // which on Windows is the bare exe path (…\powershell.exe) or an absolute path (noise).
+        string osc = s.ActivePane.S.Emulator.Title;
+        bool oscMeaningful = !string.IsNullOrWhiteSpace(osc)
+            && !osc.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+            && !(osc.Length >= 2 && osc[1] == ':' && osc.Contains('\\')); // not a bare C:\… path
+        if (oscMeaningful) return osc;
+        // Single-row title = the full current path (agterm-style "just the path"), home collapsed to ~.
+        string cwd = PrettyCwd(TitleCwd(s)).TrimEnd('\\', '/');
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\', '/');
+        if (!string.IsNullOrEmpty(home))
+        {
+            if (string.Equals(cwd, home, StringComparison.OrdinalIgnoreCase)) return "~";
+            if (cwd.StartsWith(home + "\\", StringComparison.OrdinalIgnoreCase)) return "~" + cwd[home.Length..];
+        }
+        return string.IsNullOrWhiteSpace(cwd) ? DisplayName : cwd;
+    }
+
+    private static string PrettyCwd(string raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return "";
+        string s = raw;
+        if (s.StartsWith("file://")) { s = s[7..]; int slash = s.IndexOf('/'); if (slash > 0) s = s[slash..]; }
+        try { s = Uri.UnescapeDataString(s); } catch { }
+        return s.TrimStart('/').Replace('/', '\\');
+    }
+
+    private static float MeasureText(string s, IDWriteTextFormat fmt)
+    {
+        using var tl = _dwrite.CreateTextLayout(s, fmt, 4096f, 100f);
+        return tl.Metrics.Width;
+    }
+
+    // Segoe Fluent Icons glyphs (present on Win11).
+    private const string GlyphSidebar = "";  // GlobalNavButton (hamburger)
+    private const string GlyphBell = "";     // Ringer
+    private const string GlyphTerminal = ""; // CommandPrompt (quick terminal)
+    private const string GlyphGear = "";     // Settings
+    private static readonly string GlyphAdd = ((char)0xE710).ToString();   // Add (add-session)
+    private static readonly string GlyphClose = ((char)0xE8BB).ToString(); // ChromeClose (pill x)
+
+    private void DrawTitleBar(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush)
+    {
+        _titleButtons.Clear();
+        _menuBarLabels.Clear(); _menuBarRect = default; _titleTextRect = default;
+        if (ToolbarHidden) return;   // hidden toolbar: no chrome at all (full-bleed terminal)
+        int cw = ClientW();
+        brush.Color = ChromeBg;
+        rt.FillRectangle(new Rect(0, 0, cw, TitleBarH), brush);
+
+        // 1. App-mark logo at the far left (vector rendition of the app icon).
+        DrawLogo(rt, brush, 10f, TitleBarH / 2f);
+
+        // 2. Sidebar toggle at the sidebar column's right edge (tracks _sidebarW), or right of the logo when hidden.
+        float togW = 36f;
+        float togX = _sidebarW > 0 ? MathF.Max(34f, _sidebarW - togW - 2f) : 34f;
+        {
+            var c = ChromeBtnBg(rt, brush, togX, 0, togW, TitleBarH, "toggle", _titleButtons, ChromeText);
+            brush.Color = c;
+            rt.DrawText(GlyphSidebar, _iconFont, new Rect(togX, 0, togW, TitleBarH), brush);
+        }
+
+        // 6. Right group (pinned left of the caption buttons): scratch, split, | , dashboard,
+        // quick-terminal, gear — dashboard grouped with quick behind the separator (agterm #217).
+        // Right group, laid out right-to-left; hidden buttons (Interface toggles, #241) close their gap.
+        float bw = 38f;
+        float rgRight = cw - 3 * CaptionBtnW - 6f;   // right edge of the gear
+        float x = rgRight;
+        float gearX = (x -= bw);                     // gear always shown
+        float quickX = _config.ShowQuickButton ? (x -= bw) : float.NaN;
+        float dashX = _config.ShowDashboardButton ? (x -= bw) : float.NaN;
+        float divX = x - 5f;                         // hairline divider left of the dashboard/quick group
+        bool anyPerSession = _config.ShowSplitButton || _config.ShowScratchButton;
+        if (anyPerSession) x -= 10f;                 // gap after the divider before the per-session buttons
+        float splitX = _config.ShowSplitButton ? (x -= bw) : float.NaN;
+        float scratchX = _config.ShowScratchButton ? (x -= bw) : float.NaN;
+        float rgLeft = x;                            // leftmost used edge — the title must stop before it
+
+        // 3. Title at the terminal's leading edge (right of the sidebar): a SINGLE centered row
+        // showing the path (agterm-style): custom name -> program OSC title -> full cwd path.
+        string title = _active is not null ? SessionDisplayName(_active) : DisplayName;
+        // 4. Attention bell (can be hidden via settings; when hidden it reserves no space).
+        bool showBell = _config.AttentionButton;
+        // The menu bar (MenuBar.cs) sits where the title used to start and the title moves right by
+        // it; a label that would reach the right group is dropped rather than drawn over it.
+        float barX = _sidebarW > 0 ? _sidebarW + 10f : togX + togW + 8f;
+        float barEnd = DrawMenuBar(rt, brush, barX, rgLeft - 120f);
+        float titleX = barEnd > barX ? barEnd + 12f : barX;
+        float bellW = showBell ? 34f : 0f, bellGap = showBell ? 8f : 0f;
+        // The recents clock (drawn after the bell while the sidebar is hidden) is reserved HERE like the
+        // bell, so an ellipsized title cannot push it over the right group (#246): bellW wide + its 2 px gap.
+        float clockW = showBell && _sidebarW <= 0 ? bellW + 2f : 0f;
+        float titleAvail = rgLeft - 14f - bellW - clockW - bellGap - titleX;
+        float titleMeasured = MeasureText(title, _uiFont);
+        // session.context (P3): a dimmed, smaller run AFTER the title and after the pill strip. It is
+        // a suffix and not a second caption line because TitleBarH is 40/30/0 by toolbar mode — there
+        // is no room for a second row at 30 and no row at all at 0. Title and context share the ONE
+        // titleAvail budget, in this order of claim: the pills (measured FIRST, below) are taken off
+        // the top, the context reserves at most 40% of what is left and only when that reserve can
+        // actually be drawn (a context under 20 px reserves nothing, so a title is never cut for a
+        // run that then does not appear), and the title takes the rest, ellipsized. The pill strip is
+        // anchored on the TITLE: it starts where the title ends, so a context moves it only through
+        // the title — only when the title is longer than what is left of the shared budget after the
+        // pills and the context's reserve (at least 60% of `titleShare`); a shorter title is drawn in
+        // full and its pills stay put, whatever the context (qa/persistence.md states the same bound;
+        // the earlier "never depends on the context" was more than the layout does — #234). The bell
+        // follows the run (title, pills, then the context) and clamps on its own at `rgLeft - bellW -
+        // clockW - 14`, the same edge the budget was cut from, so a run that fills the budget puts it
+        // exactly there and the right button group never moves (revmux r1; the clock joined the
+        // reservation in #246).
+        var pills = new List<(string label, Color4 bg, float w)>();
+        void Pill(string label, Color4 bg) => pills.Add((label, bg, MeasureText(label, _uiSmall) + 14f));   // small status pill after the title
+        if (_broadcast) Pill("BROADCAST", new Color4(0.85f, 0.25f, 0.25f, 0.95f));  // typing fans out to the workspace
+        if (ActiveSurface() is { ReadOnly: true }) Pill("READ-ONLY", new Color4(0.45f, 0.45f, 0.5f, 0.95f));
+        float pillsW = pills.Count == 0 ? 0f : 10f + pills.Sum(p => p.w + 6f) - 6f;   // leading gap, the pills, the gaps between them
+        float titleShare = titleAvail - pillsW;   // what the title and the context divide
+        string? ctx = _active?.Context;
+        float ctxGap = 8f, ctxMeasured = 0f, ctxReserve = 0f;
+        if (ctx is not null)
+        {
+            ctxMeasured = MeasureText(ctx, _uiSmall);
+            ctxReserve = MathF.Min(ctxMeasured + ctxGap, titleShare * 0.4f);
+            if (ctxReserve - ctxGap < 20f) ctxReserve = 0f;   // would not be drawn (the 20 px floor below): reserve nothing, shorten no title
+        }
+        float titleW = MathF.Max(30f, MathF.Min(titleMeasured, titleShare - ctxReserve));
+        brush.Color = ChromeText;
+        rt.DrawText(title, _uiTitle, new Rect(titleX, 0f, titleW, TitleBarH), brush);  // one vertically-centered, ellipsized row
+        _titleTextRect = new Rect(titleX, 0f, titleW, TitleBarH);   // File ▸ Rename Window… puts its field here
+        float runEnd = titleX + titleW;   // right edge of the title run (title, pills, then the context suffix when set)
+        float pillX = runEnd + 10f;       // anchored on the title alone — never on the context
+        foreach (var (label, bg, w) in pills)
+        {
+            brush.Color = bg;
+            rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(pillX, (TitleBarH - 20f) / 2f, w, 20f), RadiusX = 5f, RadiusY = 5f }, brush);
+            brush.Color = new Color4(1f, 1f, 1f, 1f);
+            rt.DrawText(label, _uiSmall, new Rect(pillX + 7f, (TitleBarH - 20f) / 2f + 2f, w, 16f), brush);
+            pillX += w + 6f;
+        }
+        if (pills.Count > 0) runEnd = pillX - 6f;   // the strip's right edge (its last inter-pill gap removed)
+        if (ctx is not null)
+        {
+            // The context takes what is left of the title budget after the title and the pills: at
+            // least its reserve when the title was cut for it (the pills were off the top before the
+            // reserve was taken), more when the title is short. A pill can shorten it, never move.
+            float ctxW = MathF.Min(ctxMeasured, titleX + titleAvail - runEnd - ctxGap);
+            if (ctxW >= 20f)   // nothing drawn when the title (and pills) fill the budget — the palette line carries the long form
+            {
+                brush.Color = ChromeDim;
+                rt.DrawText(ctx, _uiSmallTrim, new Rect(runEnd + ctxGap, 0f, ctxW, TitleBarH), brush, DrawTextOptions.Clip);
+                runEnd += ctxGap + ctxW;
+            }
+        }
+
+        // dim = nothing, plain = active/completed, blocked-color = any blocked (uses the configured status color).
+        if (showBell)
+        {
+            float bellX = MathF.Min(runEnd + bellGap, rgLeft - bellW - clockW - 14f);
+            var (bellBlocked, bellActive) = AttentionState();
+            var bellBase = bellBlocked ? StatusDot(AgentStatus.Blocked) : (bellActive ? ChromeText : ChromeDim);
+            if ((bellBlocked || bellActive) && !_cursorOn && AnyBlinkAttention())
+                bellBase = new Color4(bellBase.R, bellBase.G, bellBase.B, 0.30f); // pulse when a blinking session needs attention
+            var c = ChromeBtnBg(rt, brush, bellX, 0, bellW, TitleBarH, "attention", _titleButtons, bellBase);
+            DrawBellGlyph(rt, brush, bellX + bellW / 2f, TitleBarH / 2f, c);
+            // Recent-sessions clock next to the bell, only when the sidebar is hidden (agterm #212 —
+            // the sidebar itself is the recents list when visible). Opens the recent-sessions popover.
+            if (_sidebarW <= 0)
+            {
+                float clockX = bellX + bellW + 2f;
+                var cc = ChromeBtnBg(rt, brush, clockX, 0, bellW, TitleBarH, "recent", _titleButtons, ChromeDim);
+                DrawClockGlyph(rt, brush, clockX + bellW / 2f, TitleBarH / 2f, cc);
+            }
+        }
+
+        // scratch (rounded rectangle; filled when active)
+        bool scratchOn = _coverKind == 1;
+        if (_config.ShowScratchButton)
+        {
+            var c = ChromeBtnBg(rt, brush, scratchX, 0, bw, TitleBarH, "scratch", _titleButtons, scratchOn ? ChromeAccent : ChromeDim);
+            DrawScratchGlyph(rt, brush, scratchX + bw / 2f, TitleBarH / 2f, c, scratchOn);
+        }
+        // split (two panes, reflects split state and, while split, the session's axis)
+        bool splitOn = _active is not null && _active.Panes.Count > 1;
+        if (_config.ShowSplitButton)
+        {
+            var c = ChromeBtnBg(rt, brush, splitX, 0, bw, TitleBarH, "split", _titleButtons, splitOn ? ChromeAccent : ChromeDim);
+            DrawSplitGlyph(rt, brush, splitX + bw / 2f, TitleBarH / 2f, c, splitOn, splitOn && _active!.Axis == SplitAxes.Horizontal);
+        }
+        // hairline divider between per-session toggles and the window-level dashboard/quick group
+        if (anyPerSession && (_config.ShowDashboardButton || _config.ShowQuickButton))
+        {
+            brush.Color = WithA(ChromeText, 0.25f);
+            rt.DrawLine(new System.Numerics.Vector2(divX, 12f), new System.Numerics.Vector2(divX, TitleBarH - 12f), brush, 1f);
+        }
+        // dashboard grid (accent while open) — agterm #217
+        if (_config.ShowDashboardButton)
+        {
+            var c = ChromeBtnBg(rt, brush, dashX, 0, bw, TitleBarH, "dashboard", _titleButtons, _dashboardOpen ? ChromeAccent : ChromeDim);
+            DrawDashGlyph(rt, brush, dashX + bw / 2f, TitleBarH / 2f, c);
+        }
+        // quick terminal (accent when active)
+        bool quickOn = _coverKind == 2;
+        if (_config.ShowQuickButton)
+        {
+            var c = ChromeBtnBg(rt, brush, quickX, 0, bw, TitleBarH, "quick terminal", _titleButtons, quickOn ? ChromeAccent : ChromeDim);
+            brush.Color = c;
+            rt.DrawText(GlyphTerminal, _iconFont, new Rect(quickX, 0, bw, TitleBarH), brush);
+        }
+        // gear (settings) — kept per user's choice
+        {
+            var c = ChromeBtnBg(rt, brush, gearX, 0, bw, TitleBarH, "settings", _titleButtons, ChromeDim);
+            brush.Color = c;
+            rt.DrawText(GlyphGear, _iconFont, new Rect(gearX, 0, bw, TitleBarH), brush);
+        }
+
+        DrawCaption(rt, brush, cw);
+    }
+
+    /// <summary>Vector app-mark: cyan terminal chevron + block cursor + green agent-status dot (matches the app icon).</summary>
+    private void DrawLogo(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float x, float cy)
+    {
+        var cyan = new Color4(0x38 / 255f, 0xD7 / 255f, 0xF0 / 255f, 1f);
+        var cyanLt = new Color4(0x8A / 255f, 0xE2 / 255f, 0xF2 / 255f, 1f);
+        var green = new Color4(0x3D / 255f, 0xDC / 255f, 0x84 / 255f, 1f);
+        brush.Color = cyan;
+        float top = cy - 6f, mid = cy, bot = cy + 6f, lx = x + 1f, rx = x + 7f;
+        rt.DrawLine(new System.Numerics.Vector2(lx, top), new System.Numerics.Vector2(rx, mid), brush, 2.2f);
+        rt.DrawLine(new System.Numerics.Vector2(rx, mid), new System.Numerics.Vector2(lx, bot), brush, 2.2f);
+        brush.Color = cyanLt;
+        rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(x + 10f, cy + 1f, 7f, 4.5f), RadiusX = 1.5f, RadiusY = 1.5f }, brush);
+        brush.Color = green;
+        rt.FillEllipse(new Ellipse(new System.Numerics.Vector2(x + 15.5f, cy - 5f), 2.6f, 2.6f), brush);
+    }
+
+    /// <summary>Scratch glyph: a rounded rectangle (outline, or filled when active).</summary>
+    private void DrawScratchGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color, bool filled)
+    {
+        brush.Color = color;
+        var r = new RoundedRectangle { Rect = new Rect(cx - 7f, cy - 5.5f, 14f, 11f), RadiusX = 2.5f, RadiusY = 2.5f };
+        if (filled) rt.FillRoundedRectangle(r, brush); else rt.DrawRoundedRectangle(r, brush, 1.4f);
+    }
+
+    /// <summary>Attention bell glyph (plain outline bell + clapper). Never slashed; color conveys state.</summary>
+    private void DrawBellGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color)
+    {
+        brush.Color = color;
+        var g = _d2d.CreatePathGeometry();
+        using (var sink = g.Open())
+        {
+            sink.BeginFigure(new System.Numerics.Vector2(cx - 5.5f, cy + 3.5f), FigureBegin.Hollow); // bottom-left rim
+            sink.AddLine(new System.Numerics.Vector2(cx - 4f, cy - 1.5f));                            // left wall
+            sink.AddQuadraticBezier(new QuadraticBezierSegment { Point1 = new System.Numerics.Vector2(cx - 4f, cy - 6.2f), Point2 = new System.Numerics.Vector2(cx, cy - 6.2f) });
+            sink.AddQuadraticBezier(new QuadraticBezierSegment { Point1 = new System.Numerics.Vector2(cx + 4f, cy - 6.2f), Point2 = new System.Numerics.Vector2(cx + 4f, cy - 1.5f) });
+            sink.AddLine(new System.Numerics.Vector2(cx + 5.5f, cy + 3.5f));                           // right wall to rim
+            sink.EndFigure(FigureEnd.Closed);                                                          // bottom rim
+            sink.Close();
+        }
+        rt.DrawGeometry(g, brush, 1.4f);
+        g.Dispose();
+        rt.FillEllipse(new Ellipse(new System.Numerics.Vector2(cx, cy + 5.4f), 1.4f, 1.4f), brush);   // clapper
+        rt.FillEllipse(new Ellipse(new System.Numerics.Vector2(cx, cy - 6.6f), 1.1f, 1.1f), brush);   // top nub
+    }
+
+    /// <summary>Dashboard glyph: a 2×2 grid of cells (agterm #217's title-bar dashboard button).</summary>
+    private void DrawDashGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color)
+    {
+        brush.Color = color;
+        for (int r = 0; r < 2; r++)
+            for (int c = 0; c < 2; c++)
+                rt.DrawRoundedRectangle(new RoundedRectangle
+                {
+                    Rect = new Rect(cx - 7f + c * 8f, cy - 6f + r * 8f, 6f, 5f),
+                    RadiusX = 1.2f,
+                    RadiusY = 1.2f,
+                }, brush, 1.3f);
+    }
+
+    /// <summary>Recent-sessions clock glyph (agterm #212's title-bar recents button).</summary>
+    private void DrawClockGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color)
+    {
+        brush.Color = color;
+        rt.DrawEllipse(new Ellipse(new System.Numerics.Vector2(cx, cy), 6.2f, 6.2f), brush, 1.4f);
+        rt.DrawLine(new System.Numerics.Vector2(cx, cy), new System.Numerics.Vector2(cx, cy - 3.6f), brush, 1.3f);       // hour hand up
+        rt.DrawLine(new System.Numerics.Vector2(cx, cy), new System.Numerics.Vector2(cx + 2.8f, cy + 1.4f), brush, 1.3f); // minute hand
+    }
+
+    /// <summary>Split glyph: two side-by-side panes when the session is vertical or unsplit (the split
+    /// pane — right — filled when split is active); two stacked panes, the bottom one filled, when
+    /// <paramref name="horizontal"/>. The icon shows the session's axis, not a generic split (P4).</summary>
+    private void DrawSplitGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color, bool active, bool horizontal)
+    {
+        brush.Color = color;
+        rt.DrawRoundedRectangle(new RoundedRectangle { Rect = new Rect(cx - 7f, cy - 5.5f, 14f, 11f), RadiusX = 2.5f, RadiusY = 2.5f }, brush, 1.4f);
+        if (horizontal)
+        {
+            rt.DrawLine(new System.Numerics.Vector2(cx - 7f, cy), new System.Numerics.Vector2(cx + 7f, cy), brush, 1.2f);
+            if (active) rt.FillRectangle(new Rect(cx - 5.5f, cy + 1f, 11f, 3f), brush);
+        }
+        else
+        {
+            rt.DrawLine(new System.Numerics.Vector2(cx, cy - 5.5f), new System.Numerics.Vector2(cx, cy + 5.5f), brush, 1.2f);
+            if (active) rt.FillRectangle(new Rect(cx + 1f, cy - 4f, 5f, 8f), brush);
+        }
+    }
+
+    /// <summary>New-workspace glyph: a card with a plus.</summary>
+    private void DrawNewWorkspaceGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color)
+    {
+        brush.Color = color;
+        rt.DrawRoundedRectangle(new RoundedRectangle { Rect = new Rect(cx - 7f, cy - 6f, 10f, 10f), RadiusX = 2f, RadiusY = 2f }, brush, 1.3f);
+        rt.DrawLine(new System.Numerics.Vector2(cx - 3.5f, cy + 5.5f), new System.Numerics.Vector2(cx + 4.5f, cy + 5.5f), brush, 1.3f);
+        rt.DrawLine(new System.Numerics.Vector2(cx + 4.5f, cy - 3f), new System.Numerics.Vector2(cx + 4.5f, cy + 1f), brush, 1.4f);
+        rt.DrawLine(new System.Numerics.Vector2(cx + 2.5f, cy - 1f), new System.Numerics.Vector2(cx + 6.5f, cy - 1f), brush, 1.4f);
+    }
+
+    /// <summary>Flag glyph (pennant); filled when the flagged view is active.</summary>
+    private void DrawFlagGlyph(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float cx, float cy, Color4 color, bool filled)
+    {
+        brush.Color = color;
+        rt.DrawLine(new System.Numerics.Vector2(cx - 5f, cy - 6f), new System.Numerics.Vector2(cx - 5f, cy + 6f), brush, 1.4f);
+        var g = _d2d.CreatePathGeometry();
+        using (var sink = g.Open())
+        {
+            sink.BeginFigure(new System.Numerics.Vector2(cx - 5f, cy - 6f), filled ? FigureBegin.Filled : FigureBegin.Hollow);
+            sink.AddLine(new System.Numerics.Vector2(cx + 6f, cy - 4f));
+            sink.AddLine(new System.Numerics.Vector2(cx - 5f, cy - 1f));
+            sink.EndFigure(FigureEnd.Closed);
+            sink.Close();
+        }
+        if (filled) rt.FillGeometry(g, brush); else rt.DrawGeometry(g, brush, 1.3f);
+        g.Dispose();
+    }
+
+    private void DrawCaption(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, int cw)
+    {
+        int pressedIdx = _capPressed == HTMINBUTTON ? 1 : _capPressed == HTMAXBUTTON ? 2 : _capPressed == HTCLOSE ? 3 : 0;
+        for (int i = 1; i <= 3; i++) // 1 min, 2 max/restore, 3 close (left to right)
+        {
+            float x0 = cw - (4 - i) * CaptionBtnW;
+            bool hot = _hoverCaption == i || pressedIdx == i;
+            if (hot)
+            {
+                brush.Color = i == 3 ? new Color4(0.86f, 0.15f, 0.18f, 1f) : SbHighlight;
+                rt.FillRectangle(new Rect(x0, 0, CaptionBtnW, TitleBarH), brush);
+            }
+            brush.Color = ((_hoverCaption == 3 || pressedIdx == 3) && i == 3) ? new Color4(1f, 1f, 1f, 1f) : ChromeText;
+            float cx = x0 + CaptionBtnW / 2f, cy = TitleBarH / 2f;
+            if (i == 1) rt.DrawLine(new System.Numerics.Vector2(cx - 5, cy), new System.Numerics.Vector2(cx + 5, cy), brush, 1f);
+            else if (i == 2)
+            {
+                if (IsZoomed(_hwnd))
+                {
+                    rt.DrawRectangle(new Rect(cx - 5, cy - 3, 8, 8), brush, 1f);
+                    rt.DrawLine(new System.Numerics.Vector2(cx - 2, cy - 3), new System.Numerics.Vector2(cx - 2, cy - 5), brush, 1f);
+                    rt.DrawLine(new System.Numerics.Vector2(cx - 2, cy - 5), new System.Numerics.Vector2(cx + 5, cy - 5), brush, 1f);
+                    rt.DrawLine(new System.Numerics.Vector2(cx + 5, cy - 5), new System.Numerics.Vector2(cx + 5, cy + 3), brush, 1f);
+                    rt.DrawLine(new System.Numerics.Vector2(cx + 5, cy + 3), new System.Numerics.Vector2(cx + 3, cy + 3), brush, 1f);
+                }
+                else rt.DrawRectangle(new Rect(cx - 5, cy - 5, 10, 10), brush, 1f);
+            }
+            else
+            {
+                rt.DrawLine(new System.Numerics.Vector2(cx - 5, cy - 5), new System.Numerics.Vector2(cx + 5, cy + 5), brush, 1f);
+                rt.DrawLine(new System.Numerics.Vector2(cx - 5, cy + 5), new System.Numerics.Vector2(cx + 5, cy - 5), brush, 1f);
+            }
+        }
+    }
+
+    private void DrawToast(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush)
+    {
+        if (_toastText is null) return;
+        int cw = ClientW(), ch = ClientH();
+        // Wrapped inside the content area: a reload's toast carries every note of the keys it applied
+        // (a refused hotkey, a backend switch), and a single unbounded line ran off both edges.
+        float maxW = Math.Max(120f, (cw - _sidebarW) - 32f);
+        using var layout = _dwrite.CreateTextLayout(_toastText, _uiFont, Math.Max(1f, maxW - 32f), Math.Max(1f, ch - 48f));
+        layout.WordWrapping = WordWrapping.Wrap;
+        float tw = Math.Min(maxW, layout.Metrics.Width + 32f), th = Math.Max(34f, layout.Metrics.Height + 16f);
+        layout.MaxWidth = Math.Max(1f, tw - 32f); layout.MaxHeight = th;
+        layout.ParagraphAlignment = ParagraphAlignment.Center;
+        float cx = _sidebarW + ((cw - _sidebarW) - tw) / 2f;
+        float ty = ch - th - 24f;
+        _toastRect = new Rect(cx, ty, tw, th);   // recorded for click-to-jump hit-testing
+        brush.Color = Mix(ChromeBg, ChromeText, 0.14f);
+        rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(cx, ty, tw, th), RadiusX = 8f, RadiusY = 8f }, brush);
+        brush.Color = ChromeText;
+        rt.DrawTextLayout(new System.Numerics.Vector2(cx + 16f, ty), layout, brush, DrawTextOptions.Clip);
+    }
+
+    /// <summary>While a leader sequence is pending, a small pill hint (bottom-left of the content region).</summary>
+    private void DrawLeaderHint(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush)
+    {
+        if (!_leaderPending) return;
+        string txt = $"leader  {_leader}  —  press a key…";
+        float tw = MeasureText(txt, _uiFont) + 32f, th = 34f;
+        float x = _sidebarW + 24f, y = ClientH() - th - 24f;
+        brush.Color = new Color4(0.22f, 0.17f, 0.33f, 1f);   // purple-ish so it reads distinctly from a toast
+        rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(x, y, tw, th), RadiusX = 8f, RadiusY = 8f }, brush);
+        brush.Color = new Color4(1f, 1f, 1f, 1f);             // fixed light text (pill bg is always dark)
+        rt.DrawText(txt, _uiFont, new Rect(x + 16f, y, tw - 24f, th), brush);
+    }
+
+    // ---- Config (mirrors the WinUI shell) ----
+
+    // ---- Theming ----
+
+    private void ApplyTheme(Theme t) { _theme = t; RecomputeChrome(); RequestRedraw(); }
+
+    /// <summary>Resolve the effective theme when "follow Windows light/dark" is on: pick theme-light or
+    /// theme-dark per the current OS setting; when off, fall back to the single manual <c>theme</c>.
+    /// Called at startup, on WM_SETTINGCHANGE (ImmersiveColorSet), and when any theme key changes.</summary>
+    private void ApplySystemTheme()
+    {
+        if (!_config.ThemeFollowSystem) { ApplyTheme(FindTheme(_config.Theme)); return; }
+        string want = WindowsPrefersLightTheme() ? _config.ThemeLight : _config.ThemeDark;
+        if (!string.IsNullOrWhiteSpace(want)) ApplyTheme(FindTheme(want));  // unset side → leave current
+    }
+
+    /// <summary>True when Windows apps are set to light mode (HKCU …Personalize\AppsUseLightTheme=1).
+    /// Missing value or any error → treated as dark, the Windows default.</summary>
+    private static bool WindowsPrefersLightTheme()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return k?.GetValue("AppsUseLightTheme") is int v && v != 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Apply the window-opacity config via a layered window (LWA_ALPHA). 100% removes the layered style.</summary>
+    private void ApplyWindowOpacity()
+    {
+        if (_hwnd == IntPtr.Zero) return;
+        int pct = System.Math.Clamp(_config.WindowOpacity, 30, 100);
+        long ex = (long)GetWindowLongPtrW(_hwnd, GWL_EXSTYLE);
+        if (pct >= 100)
+        {
+            if ((ex & WS_EX_LAYERED) != 0) SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)(ex & ~WS_EX_LAYERED));
+            return;
+        }
+        if ((ex & WS_EX_LAYERED) == 0) SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, (IntPtr)(ex | WS_EX_LAYERED));
+        SetLayeredWindowAttributes(_hwnd, 0, (byte)(pct * 255 / 100), LWA_ALPHA);
+    }
+
+    private void CommitTheme(Theme t)
+    {
+        ApplyTheme(t);
+        _config.Theme = t.Name;
+        _themeBeforePreview = null;
+        try { SaveThemeConfig(t.Name); } catch { }
+    }
+
+    /// <summary>Live-preview the theme under the selection while the theme picker is open.</summary>
+    private void PreviewSelectedTheme()
+    {
+        if (_palette != PaletteKind.Themes) return;
+        if (_palSel >= 0 && _palSel < _palItems.Count && _palItems[_palSel].Data is Theme th) ApplyTheme(th);
+    }
+
+    // ---- Prompt preview: the omp/starship pickers render the highlighted theme's prompt in the
+    // scratch terminal (the palette skips its scrim + sits lower so the scratch stays visible). ----
+
+    private const int PromptPreviewTimer = 9;   // debounce: rendering a prompt spawns a process
+    private bool _previewScratchOpened;         // we opened the scratch for the picker — close it with the palette
+
+    private void SchedulePromptPreview()
+    {
+        if (_palette is PaletteKind.Omp or PaletteKind.Starship)
+            SetTimer(_hwnd, (IntPtr)PromptPreviewTimer, 350, IntPtr.Zero);
+    }
+
+    private void PromptPreviewTick()
+    {
+        KillTimer(_hwnd, (IntPtr)PromptPreviewTimer);
+        if (_palette is not (PaletteKind.Omp or PaletteKind.Starship)) return;
+        if (_palSel < 0 || _palSel >= _palItems.Count || _palItems[_palSel].Data is not string sel) return;
+        var ses = _active;
+        if (ses is null) return;
+        bool scratchShowing = _coverKind == 1 && ses.Scratch is not null && ReferenceEquals(_cover, ses.Scratch);
+        if (!scratchShowing) { ShowScratch(ses); _previewScratchOpened = true; }
+        if (ses.Scratch is not { } sc) return;
+        const string utf8 = "chcp 65001 >$null; $OutputEncoding=[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ";   // UTF-8 for native writes AND PS-captured output
+        string cmd = _palette == PaletteKind.Omp
+            ? utf8 + "clear; oh-my-posh print primary --config '" + sel.Replace("'", "''") + "'\r"
+            : StarshipPreviewCmd(sel);
+        if (cmd.Length == 0) return;
+        sc.S.NotifyActivity();
+        sc.S.Write(Encoding.UTF8.GetBytes(cmd));
+    }
+
+    private string StarshipPreviewCmd(string preset)
+    {
+        string? cfg = preset.Length == 0 ? null : Wagterm.Pty.StarshipPresets.ConfigFor(preset, AppDir);
+        if (preset.Length > 0 && cfg is null) return "";
+        string set = cfg is not null
+            ? "$env:STARSHIP_CONFIG='" + cfg.Replace("'", "''") + "'"
+            : "Remove-Item Env:STARSHIP_CONFIG -ErrorAction SilentlyContinue";
+        return "chcp 65001 >$null; $OutputEncoding=[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + set + "; clear; starship prompt\r";
+    }
+
+    // ---- oh-my-posh scheme changer (in-app extension) ----
+
+    /// <summary>Apply an oh-my-posh theme (name or .omp.json path) live to the active session's shell,
+    /// re-running oh-my-posh init and RE-APPLYING our OSC-7 prompt wrap (init redefines `prompt`, which
+    /// would drop the wrap). Persists to config when asked so new sessions launch with it.</summary>
+    public string OmpSet(string nameOrPath, bool persist)
+    {
+        string? path = Wagterm.Pty.OmpThemes.Resolve(nameOrPath);
+        if (path is null) return Wagterm.Pty.ISessionHost.RefusePrefix + OmpThemes.NotFound(nameOrPath);   // ok:false: nothing changed (#246)
+        PostVerb(() => ApplyOmp(path, persist));   // a control verb: the post's outcome is the reply (#228 item 5)
+        return "oh-my-posh theme set: " + nameOrPath;
+    }
+
+    private void ApplyOmp(string path, bool persist)
+    {
+        if (ActiveSurface() is { } pane)
+        {
+            string q = path.Replace("'", "''");
+            // Re-init oh-my-posh with the chosen config (which redefines `prompt`), then wrap that NEW
+            // prompt to keep emitting OSC 7 so the title's live cwd survives the switch. One clean line.
+            string line =
+                "oh-my-posh init pwsh --config '" + q + "' | Invoke-Expression; " +
+                "$__o=$function:prompt; function global:prompt { " +
+                "[Console]::Write(\"$([char]27)]7;file://$env:COMPUTERNAME/$(((Get-Location).ProviderPath -replace '\\\\','/'))$([char]7)\"); " +
+                "& $__o }\r";
+            pane.S.NotifyActivity();
+            pane.S.Write(Encoding.UTF8.GetBytes(line));
+            RequestRedraw();
+        }
+        if (persist) { try { WriteConfigKey("omp-theme", path); } catch { } _config.OmpTheme = path; }
+    }
+
+    /// <summary>Apply a starship preset ("" = starship default) live to the active session's shell
+    /// (re-init + re-wrap, mirroring ApplyOmp) and persist so new sessions launch with it.</summary>
+    private void ApplyStarship(string preset, bool persist)
+    {
+        string? cfgPath = Wagterm.Pty.StarshipPresets.ConfigFor(preset, AppDir);
+        if (preset.Length > 0 && cfgPath is null) { ShowToast("starship preset failed: " + preset); return; }
+        if (ActiveSurface() is { } pane)
+        {
+            string setCfg = cfgPath is not null
+                ? "$env:STARSHIP_CONFIG='" + cfgPath.Replace("'", "''") + "'; "
+                : "Remove-Item Env:STARSHIP_CONFIG -ErrorAction SilentlyContinue; ";
+            string line = setCfg +
+                "Invoke-Expression (&starship init powershell); " +
+                "$__o=$function:prompt; function global:prompt { " +
+                "[Console]::Write(\"$([char]27)]7;file://$env:COMPUTERNAME/$(((Get-Location).ProviderPath -replace '\\\\','/'))$([char]7)\"); " +
+                "& $__o }\r";
+            pane.S.NotifyActivity();
+            pane.S.Write(Encoding.UTF8.GetBytes(line));
+            RequestRedraw();
+        }
+        if (persist) { try { WriteConfigKey("starship-theme", preset); } catch { } _config.StarshipTheme = preset; }
+    }
+
+    /// <summary>Refresh the process PATH from the registry (Machine + User) so an engine installed
+    /// moments ago (winget) is detectable — and inherited by new sessions — without an app restart.</summary>
+    private static void RefreshEnvPath()
+    {
+        try
+        {
+            string machine = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.Machine) ?? "";
+            string user = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? "";
+            var current = new HashSet<string>((Environment.GetEnvironmentVariable("Path") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries), StringComparer.OrdinalIgnoreCase);
+            var add = machine.Split(';', StringSplitOptions.RemoveEmptyEntries)
+                .Concat(user.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                .Where(p => !current.Contains(p)).ToList();
+            if (add.Count > 0)
+                Environment.SetEnvironmentVariable("Path", Environment.GetEnvironmentVariable("Path") + ";" + string.Join(';', add));
+        }
+        catch { }
+    }
+
+    /// <summary>Install a prompt engine via winget in an overlay terminal (live progress, any key
+    /// closes when done). Re-open the picker afterwards — PATH is refreshed on open.</summary>
+    private void InstallPromptEngine(string engine)
+    {
+        var ses = _active;
+        if (ses is null) { ShowToast("open a session first"); return; }
+        string id = engine == "starship" ? "Starship.Starship" : "JanDeDobbeleer.OhMyPosh";
+        OverlayOpen(ses, null, $"winget install --id {id} -e --accept-source-agreements --accept-package-agreements", 70, wait: true);
+        ShowToast($"installing {(engine == "starship" ? "starship" : "oh-my-posh")} — re-open the picker when it finishes");
+    }
+
+    /// <summary>Install a Nerd Font via oh-my-posh's font tool (engine-agnostic: starship themes
+    /// need the same glyphs) in an overlay, and point font-family at the new family. When omp isn't
+    /// installed yet, installs it first — it IS the font tool.</summary>
+    private void InstallNerdFont(string slug, string family)
+    {
+        var ses = _active;
+        if (ses is null) { ShowToast("open a session first"); return; }
+        RefreshEnvPath();
+        if (Wagterm.Pty.OmpThemes.List().Count == 0 && !CommandExists("oh-my-posh"))
+        {
+            InstallPromptEngine("omp");   // omp is the font installer; re-pick the font afterwards
+            ShowToast("installing oh-my-posh first (it provides the font installer) — then re-pick the font");
+            return;
+        }
+        OverlayOpen(ses, null, $"oh-my-posh font install {slug}", 70, wait: true);
+        ConfigSetInternal("font-family", family);
+        ShowToast($"installing {family} — the terminal switches to it once the overlay finishes");
+    }
+
+    /// <summary>oh-my-posh present? Theme folders OR the exe itself — the Microsoft Store install
+    /// has no POSH_THEMES_PATH/winget themes dir, yet is fully usable (init + font tool).</summary>
+    private static bool OmpAvailable() => Wagterm.Pty.OmpThemes.List().Count > 0 || CommandExists("oh-my-posh");
+
+    /// <summary>Download oh-my-posh's official themes pack (GitHub release asset) into an
+    /// wagterm-local dir the theme scanner reads — for installs that ship no themes on disk.</summary>
+    private void DownloadOmpThemes()
+    {
+        ShowToast("downloading oh-my-posh themes pack…");
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            try
+            {
+                string dir = Path.Combine(AppDir, "omp-themes");
+                Directory.CreateDirectory(dir);
+                using var http = new System.Net.Http.HttpClient();
+                http.DefaultRequestHeaders.UserAgent.ParseAdd("wagterm");
+                byte[] bytes = await http.GetByteArrayAsync("https://github.com/JanDeDobbeleer/oh-my-posh/releases/latest/download/themes.zip");
+                string zip = Path.Combine(dir, "themes.zip");
+                await File.WriteAllBytesAsync(zip, bytes);
+                System.IO.Compression.ZipFile.ExtractToDirectory(zip, dir, overwriteFiles: true);
+                File.Delete(zip);
+                int n = Directory.GetFiles(dir, "*.omp.json").Length;
+                Post(() => ShowToast($"{n} oh-my-posh themes downloaded — open “oh-my-posh Theme…” again"));
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.Message;
+                Post(() => ShowToast("themes download failed: " + msg));
+            }
+        });
+    }
+
+    private static bool CommandExists(string exe)
+    {
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo(exe, "--version")
+            { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false, CreateNoWindow = true };
+            using var p = System.Diagnostics.Process.Start(psi);
+            if (p is null) return false;
+            if (!p.WaitForExit(4000)) { try { p.Kill(); } catch { } return false; }
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Switch the prompt engine (omp | starship | vanilla): persists, re-inits the active
+    /// session's shell for omp/starship (vanilla applies to new sessions only), and keeps the legacy
+    /// omp-integration key in sync.</summary>
+    private void ApplyPromptEngine(string engine)
+    {
+        _config.PromptEngine = engine;
+        try { WriteConfigKey("prompt-engine", engine); WriteConfigKey("omp-integration", engine == "omp" ? "true" : "false"); } catch { }
+        _config.OmpIntegration = engine == "omp";
+        switch (engine)
+        {
+            case "starship" when Wagterm.Pty.StarshipPresets.Available():
+                ApplyStarship(_config.StarshipTheme, persist: false);
+                ShowToast("prompt engine: starship — pick a preset via “Starship Theme…”");
+                break;
+            case "omp" when OmpAvailable():
+                if (Wagterm.Pty.OmpThemes.Resolve(_config.OmpTheme) is { } p) ApplyOmp(p, persist: false);
+                else if (ActiveSurface() is { } op)   // no theme configured (e.g. Store install, no themes dir): init with omp's default/env theme
+                {
+                    op.S.NotifyActivity();
+                    op.S.Write(Encoding.UTF8.GetBytes(
+                        "oh-my-posh init pwsh | Invoke-Expression; " +
+                        "$__o=$function:prompt; function global:prompt { " +
+                        "[Console]::Write(\"$([char]27)]7;file://$env:COMPUTERNAME/$(((Get-Location).ProviderPath -replace '\\\\','/'))$([char]7)\"); " +
+                        "& $__o }\r"));
+                }
+                ShowToast("prompt engine: oh-my-posh — pick a theme via “oh-my-posh Theme…”");
+                break;
+            case "vanilla":
+                if (ActiveSurface() is { } vp)   // live: reset to the stock prompt right away
+                {
+                    vp.S.NotifyActivity();
+                    vp.S.Write(Encoding.UTF8.GetBytes(VanillaPromptReset + "\r"));
+                }
+                ShowToast("prompt engine: vanilla — plain PowerShell prompt");
+                break;
+            case "profile":
+                ShowToast("prompt engine: profile — new sessions get no injection ($PROFILE rules)");
+                break;
+            default:
+                ShowToast($"prompt engine set to {engine} (engine not detected — install it first)");
+                break;
+        }
+    }
+
+    private static Theme FindTheme(string name)
+        => _allThemes.FirstOrDefault(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)) ?? Theme.Default;
+
+    /// <summary>Persist the chosen theme by rewriting (or appending) the `theme =` line in the config.</summary>
+    private static void SaveThemeConfig(string name) => WriteConfigKey("theme", name);
+
+    /// <summary>All config keys the Settings window / config verbs manage.</summary>
+    private static readonly string[] ConfigKeys =
+    {
+        "font-family", "font-size", "cursor-style", "cursor-blink", "cursor-blink-ms", "theme",
+        "theme-follow-system", "theme-dark", "theme-light",
+        "scrollback-lines", "inactive-pane-dim", "unfocused-dim", "builtin-glyphs", "ligatures", "window-opacity", "sidebar-tint", "sidebar-font-size", "scroll-speed",
+        "new-session-dir", "right-click-paste", "copy-on-select", "copy-on-ctrl-c", "word-delimiters", "desktop-notifications", "shell-integration",
+        "restore-commands", "restore-buffer", "blocked-sound", "notification-sound", "omp-theme", "omp-integration", "prompt-engine", "starship-theme",
+        "new-session-dir-mode", "confirm-close-session", "compact-toolbar", "toolbar-mode", "notification-badges",
+        "notification-color-ok", "notification-color-normal", "notification-color-attention", "workspace-add-button",
+        "show-scratch-button", "show-split-button", "show-dashboard-button", "show-quick-button", "show-menu-bar",
+        "quick-terminal-size", "quick-terminal-hotkey",
+        "attention-button", "status-color-active", "status-color-blocked", "status-color-completed",
+        "paste-protection", "clipboard-write", "notification-flash", "claude-update-check", "update-check",
+        "session-host", "fresh-env", "emulator-core",
+    };
+
+    /// <summary>Rewrite (or append) a single `key = value` line in wagterm.conf, preserving the rest.</summary>
+    private static void WriteConfigKey(string key, string value)
+    {
+        string path = ConfigPath;
+        string text = File.Exists(path) ? File.ReadAllText(path) : TerminalConfig.DefaultText;
+        var lines = text.Replace("\r\n", "\n").Split('\n').ToList();
+        int idx = lines.FindLastIndex(l =>
+        {
+            var t = l.TrimStart();
+            int eq = l.IndexOf('=');
+            return !t.StartsWith("#") && eq > 0 && string.Equals(l[..eq].Trim(), key, StringComparison.OrdinalIgnoreCase);
+        });
+        string ln = $"{key} = {value}";
+        if (idx >= 0) lines[idx] = ln; else { lines.Add(ln); }
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        // A failed write must never truncate the user's existing configuration. The sibling
+        // temporary file keeps replacement on the same volume; a failed move leaves path intact.
+        string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temp, string.Join(Environment.NewLine, lines));
+            File.Move(temp, path, overwrite: true);
+        }
+        finally { if (File.Exists(temp)) File.Delete(temp); }
+    }
+
+    /// <summary>Current value of a config key as a string (for config get/list + the Settings window).</summary>
+    private static string ConfigValue(string key) => key switch
+    {
+        "font-family" => _config.FontFamily,
+        "font-size" => _config.FontSize.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        "cursor-style" => _config.CursorStyle.ToString().ToLowerInvariant(),
+        "cursor-blink" => _config.CursorBlink ? "true" : "false",
+        "cursor-blink-ms" => _config.CursorBlinkMs.ToString(),
+        "theme" => _config.Theme,
+        "theme-follow-system" => _config.ThemeFollowSystem ? "true" : "false",
+        "theme-dark" => _config.ThemeDark,
+        "theme-light" => _config.ThemeLight,
+        "scrollback-lines" => _config.Scrollback.ToString(),
+        "inactive-pane-dim" => _config.InactivePaneDim.ToString(),
+        "unfocused-dim" => _config.UnfocusedDim.ToString(),
+        "builtin-glyphs" => _config.BuiltinGlyphs ? "true" : "false",
+        "ligatures" => _config.Ligatures ? "true" : "false",
+        "window-opacity" => _config.WindowOpacity.ToString(),
+        "sidebar-tint" => _config.SidebarTint.ToString(),
+        "sidebar-font-size" => _config.SidebarFontSize.ToString(),
+        "scroll-speed" => _config.ScrollSpeed.ToString(),
+        "new-session-dir" => _config.NewSessionDir,
+        "right-click-paste" => _config.RightClickPaste ? "true" : "false",
+        "copy-on-select" => _config.CopyOnSelect ? "true" : "false",
+        "copy-on-ctrl-c" => _config.CopyOnCtrlC ? "true" : "false",
+        "word-delimiters" => _config.WordDelimiters,
+        "desktop-notifications" => _config.DesktopNotifications ? "true" : "false",
+        "shell-integration" => _config.ShellIntegration ? "true" : "false",
+        "restore-commands" => _config.RestoreCommands ? "true" : "false",
+        "restore-buffer" => _config.RestoreBuffer ? "true" : "false",
+        "blocked-sound" => _config.BlockedSound,
+        "notification-sound" => _config.NotificationSound,
+        "omp-theme" => _config.OmpTheme,
+        "omp-integration" => _config.OmpIntegration ? "true" : "false",
+        "prompt-engine" => _config.PromptEngine,
+        "starship-theme" => _config.StarshipTheme,
+        "new-session-dir-mode" => _config.NewSessionDirMode,
+        "confirm-close-session" => _config.ConfirmCloseSession ? "true" : "false",
+        "compact-toolbar" => _config.CompactToolbar ? "true" : "false",
+        "toolbar-mode" => ToolbarModeResolved,
+        "notification-badges" => _config.NotificationBadges ? "true" : "false",
+        "notification-color-ok" => _config.NotificationColorOk,
+        "notification-color-normal" => _config.NotificationColorNormal,
+        "notification-color-attention" => _config.NotificationColorAttention,
+        "workspace-add-button" => _config.WorkspaceAddButton ? "true" : "false",
+        "show-scratch-button" => _config.ShowScratchButton ? "true" : "false",
+        "show-split-button" => _config.ShowSplitButton ? "true" : "false",
+        "show-dashboard-button" => _config.ShowDashboardButton ? "true" : "false",
+        "show-quick-button" => _config.ShowQuickButton ? "true" : "false",
+        "show-menu-bar" => _config.ShowMenuBar ? "true" : "false",
+        "quick-terminal-size" => _config.QuickTerminalSize.ToString(),
+        "quick-terminal-hotkey" => _config.QuickTerminalHotkey,
+        "notification-flash" => _config.NotificationFlash,
+        "claude-update-check" => _config.ClaudeUpdateCheck ? "true" : "false",
+        "update-check" => _config.UpdateCheck ? "true" : "false",
+        "session-host" => _config.SessionHost,
+        "fresh-env" => _config.FreshEnv ? "true" : "false",
+        "emulator-core" => _config.EmulatorCore,
+        "paste-protection" => _config.PasteProtection ? "true" : "false",
+        "clipboard-write" => _config.ClipboardWrite ? "true" : "false",
+        "attention-button" => _config.AttentionButton ? "true" : "false",
+        "status-color-active" => _config.StatusColorActive,
+        "status-color-blocked" => _config.StatusColorBlocked,
+        "status-color-completed" => _config.StatusColorCompleted,
+        _ => "",
+    };
+
+    /// <summary>Persist + apply a config key live. Runs on the UI thread. Returns an ack string.</summary>
+    private string ConfigSetInternal(string key, string value)
+    {
+        key = key.Trim().ToLowerInvariant();
+        if (Array.IndexOf(ConfigKeys, key) < 0) return "error: unknown key '" + key + "'";
+        if (key == "cursor-style" && value.Trim().ToLowerInvariant() is not ("bar" or "beam" or "line" or "block" or "box" or "underline" or "underscore"))
+            return "error: cursor-style must be bar, block or underline";
+        if (key == "cursor-blink" && value.Trim().ToLowerInvariant() is not ("true" or "false" or "on" or "off" or "yes" or "no" or "1" or "0"))
+            return "error: cursor-blink must be a boolean";
+        if (key == "cursor-blink-ms" && (!int.TryParse(value.Trim(), out int blinkMs) || blinkMs <= 0))
+            return "error: cursor-blink-ms must be a positive integer";
+        if (key == "quick-terminal-size" && (!int.TryParse(value.Trim(), out int qs) || qs is < 40 or > 90))
+            return "error: quick-terminal-size must be an integer from 40 through 90";
+        if (key == "quick-terminal-hotkey")
+        {
+            if (SetQuickHotkey(value.Trim(), () => WriteConfigKey(key, value.Trim())) is { } error) return error;
+        }
+        else WriteConfigKey(key, value.Trim());
+        // Reparse so clamping/validation is centralized, and apply what the file changed — this key
+        // always. The steps' notes go into ONE toast: a set that also picks up hand edits of the
+        // backend and the core would otherwise show only the last note.
+        var notes = new List<string>();
+        ReloadConfigApplying(key, notes);
+        if (notes.Count > 0) ShowToast(string.Join("\n", notes), 7000);
+        bool deferred = key is "scrollback-lines" or "shell-integration" or "restore-commands";
+        return $"{key} = {ConfigValue(key)}" + (deferred ? "  (applies to new sessions)" : "");
+    }
+
+    /// <summary>Re-read wagterm.conf into <see cref="_config"/> and apply every key whose value
+    /// changed, plus <paramref name="alwaysKey"/> — the key a <c>config set</c> just wrote, applied
+    /// even when its value reads the same. The file is the truth: a key edited by hand is applied by
+    /// the next set or reload, so <c>_config</c> never holds an unapplied value (the theme picker and
+    /// the prompt-engine writers update <c>_config</c> themselves as they apply, and a set of the
+    /// hotkey registers before it writes). The file's quick-terminal hotkey is registered whenever
+    /// it is not the registered chord — a no-op when it is, which includes right after a set of the
+    /// hotkey — so a hand edit takes effect at the next set or reload and a chord refused earlier (at
+    /// startup, or by the last reload) is tried again; a refusal leaves the previous chord
+    /// registered while <c>config get</c> reports the file. The refusal is noted by every reload,
+    /// but by a set only when the hotkey text changed since the last load: a text that cannot
+    /// register would otherwise be reported again on every Settings toggle and slider step. Every
+    /// note goes into <paramref name="notes"/>, never straight to a toast — the toast has one slot.
+    /// Returns the keys applied. Runs on the UI thread.</summary>
+    private List<string> ReloadConfigApplying(string? alwaysKey, List<string> notes)
+    {
+        var before = ConfigKeys.ToDictionary(k => k, ConfigValue, StringComparer.Ordinal);
+        _config = TerminalConfig.Load(ConfigPath);
+        var changed = ConfigKeys.Where(k => ConfigValue(k) != before[k]).ToList();
+        if (alwaysKey is not null && !changed.Contains(alwaysKey)) changed.Add(alwaysKey);
+        if (SetQuickHotkey(_config.QuickTerminalHotkey) is { } hotkeyError)
+        {
+            bool report = alwaysKey is null || changed.Contains("quick-terminal-hotkey");
+            changed.Remove("quick-terminal-hotkey");
+            if (report) notes.Add(hotkeyError);
+        }
+        ApplyConfigKeys(changed, notes);
+        return changed;
+    }
+
+    /// <summary>The live effects of <paramref name="keys"/> having changed in <see cref="_config"/>:
+    /// the per-key steps (a backend, a core, the blink timer, the quick size, a regrid, a font) and
+    /// the unconditional refresh. Both <c>config set</c> and File ▸ Reload Config reach it through
+    /// <see cref="ReloadConfigApplying"/> with every key the file changed — one list of steps, so a
+    /// reload cannot fall short of a set (the quick-terminal hotkey is the one step outside it: its
+    /// registration can be refused, so <see cref="ReloadConfigApplying"/> runs it first and notes a
+    /// refusal). A step's note — the backend and core switches announce themselves, and a font that
+    /// fell back says so — is collected into <paramref name="notes"/> for the caller's ONE toast:
+    /// the toast has one slot, and a note toasted here would be replaced by the next before it was
+    /// ever drawn. Runs on the UI thread.</summary>
+    private void ApplyConfigKeys(IReadOnlyCollection<string> keys, List<string> notes)
+    {
+        bool Has(string k) => keys.Contains(k);
+        void Note(string text) => notes.Add(text);
+        if (Has("quick-terminal-size") && _quickHost?._quickVisible == true) _quickHost.PositionQuick();
+        if (Has("theme")) _theme = FindTheme(_config.Theme);
+        if (Has("theme") || Has("theme-follow-system") || Has("theme-dark") || Has("theme-light")) ApplySystemTheme();
+        if (Has("session-host"))
+        {
+            // Live switch (#105 2d): NEW sessions use the chosen backend immediately; existing panes
+            // keep the one they were born with (both kinds coexist fine) and converge on restart.
+            _sessionBackend = SessionBackends.Resolve(_config.SessionHost, _argPipe ?? _appId, AppExePath, _config.Conpty);
+            Note(_config.SessionHost switch
+            {
+            "server" => "server mode ON (experimental) — new sessions survive UI restarts; restart WagTerm to move existing ones",
+            "server-rust" => "Rust server mode ON (experimental) — new sessions live in the Rust pty-host; restart WagTerm to move existing ones",
+            _ => "in-process mode — new sessions run in the window process; restart WagTerm to convert existing ones",
+            });
+        }
+        if (Has("conpty"))
+        {
+            // New in-process sessions use the chosen ConPTY now. A running pty-host keeps the one it
+            // started with; the next one it starts gets the new key.
+            var api = ConPtyApi.Select(_config.Conpty != "inbox");
+            _sessionBackend = SessionBackends.Resolve(_config.SessionHost, _argPipe ?? _appId, AppExePath, _config.Conpty);
+            Note($"conpty — new sessions use {api.Description}; a running pty-host keeps its own until it restarts");
+        }
+        if (Has("emulator-core"))
+        {
+            // Live switch, same semantics as session-host: NEW sessions get the chosen core;
+            // existing panes keep the one they were born with and converge on restart.
+            ResolveEmulatorCore();
+            Note(_emulatorCoreNote ?? "emulator-core = managed — new sessions use the C# emulator");
+            _emulatorCoreNote = null;   // startup path only announces once
+        }
+        if (Has("cursor-blink-ms"))
+            foreach (var window in _registry.Values.ToArray())
+                if (window._hwnd != IntPtr.Zero) SetTimer(window._hwnd, (IntPtr)1, (uint)_config.CursorBlinkMs, IntPtr.Zero);
+        RecomputeChrome();
+        ApplyWindowOpacity();
+        if (Has("compact-toolbar") || Has("toolbar-mode"))   // title-bar height changed → reflow the terminal grid
+        { if (_active is not null) RegridSession(_active); if (_cover is not null) RegridCover(); }
+        if (Has("font-family") || Has("font-size"))
+        {
+            RebuildFont();   // apply live to the running window; it toasts a fallback itself, and the
+            if (_fontFallbackNote is { } fontNote && !notes.Contains(fontNote)) Note(fontNote);   // caller's toast, which replaces that, must carry it too
+        }
+        if (Has("sidebar-font-size")) RebuildSidebarFonts();         // apply the new sidebar name size live
+        RequestRedraw();
+        RefreshSettingsControls();                        // keep an open Settings window in sync
+    }
+
+    /// <summary>
+    /// Built-in themes, then the curated ghostty files bundled next to the exe (themes/),
+    /// then any user files in %LOCALAPPDATA%\wagterm\themes\. Deduped by name
+    /// (case-insensitive), first-seen wins — so a compiled built-in beats a bundled/user
+    /// file of the same name, and bundled beats user.
+    /// </summary>
+    private static List<Theme> LoadThemes()
+    {
+        var builtins = new List<Theme>
+        {
+            Theme.Default, // "default"
+            Make("Solarized Dark",
+                new[]{"#073642","#dc322f","#859900","#b58900","#268bd2","#d33682","#2aa198","#eee8d5",
+                      "#002b36","#cb4b16","#586e75","#657b83","#839496","#6c71c4","#93a1a1","#fdf6e3"},
+                "#839496","#002b36","#93a1a1"),
+            Make("Solarized Light",
+                new[]{"#073642","#dc322f","#859900","#b58900","#268bd2","#d33682","#2aa198","#eee8d5",
+                      "#002b36","#cb4b16","#586e75","#657b83","#839496","#6c71c4","#93a1a1","#fdf6e3"},
+                "#657b83","#fdf6e3","#586e75"),
+            Make("Nord",
+                new[]{"#3b4252","#bf616a","#a3be8c","#ebcb8b","#81a1c1","#b48ead","#88c0d0","#e5e9f0",
+                      "#4c566a","#bf616a","#a3be8c","#ebcb8b","#81a1c1","#b48ead","#8fbcbb","#eceff4"},
+                "#d8dee9","#2e3440","#d8dee9"),
+            Make("Gruvbox Dark",
+                new[]{"#282828","#cc241d","#98971a","#d79921","#458588","#b16286","#689d6a","#a89984",
+                      "#928374","#fb4934","#b8bb26","#fabd2f","#83a598","#d3869b","#8ec07c","#ebdbb2"},
+                "#ebdbb2","#282828","#ebdbb2"),
+            Make("Tokyo Night",
+                new[]{"#15161e","#f7768e","#9ece6a","#e0af68","#7aa2f7","#bb9af7","#7dcfff","#a9b1d6",
+                      "#414868","#f7768e","#9ece6a","#e0af68","#7aa2f7","#bb9af7","#7dcfff","#c0caf5"},
+                "#c0caf5","#1a1b26","#c0caf5"),
+            Make("One Dark",
+                new[]{"#282c34","#e06c75","#98c379","#e5c07b","#61afef","#c678dd","#56b6c2","#abb2bf",
+                      "#545862","#e06c75","#98c379","#e5c07b","#61afef","#c678dd","#56b6c2","#c8ccd4"},
+                "#abb2bf","#282c34","#528bff"),
+        };
+
+        var list = new List<Theme>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void Add(Theme t) { if (seen.Add(t.Name)) list.Add(t); }
+
+        foreach (var t in builtins) Add(t);
+
+        // Bundled themes ship in themes/ next to the exe; user themes live under LOCALAPPDATA.
+        string bundledDir = Path.Combine(AppContext.BaseDirectory, "themes");
+        string userDir = Path.Combine(AppDir, "themes");
+        foreach (var dir in new[] { bundledDir, userDir })
+        {
+            try
+            {
+                if (!Directory.Exists(dir)) continue;
+                foreach (var f in Directory.GetFiles(dir))
+                    if (ParseGhosttyTheme(f) is Theme th) Add(th);
+            }
+            catch { }
+        }
+
+        // Single-file portable exe: no themes\ dir on disk — the same curated themes are embedded
+        // in the assembly (disk copies above win the name dedup when both exist).
+        try
+        {
+            var asm = typeof(Program).Assembly;
+            foreach (var res in asm.GetManifestResourceNames())
+            {
+                if (!res.StartsWith("theme:", StringComparison.Ordinal)) continue;
+                using var s = asm.GetManifestResourceStream(res);
+                if (s is null) continue;
+                using var r = new StreamReader(s);
+                var lines = new List<string>();
+                while (r.ReadLine() is { } ln) lines.Add(ln);
+                if (ParseGhosttyTheme(res["theme:".Length..], lines) is Theme th) Add(th);
+            }
+        }
+        catch { }
+        return list;
+    }
+
+    private static Theme Make(string name, string[] hex16, string fg, string bg, string cursor) => new()
+    {
+        Name = name,
+        Palette = hex16.Select(Hex).ToArray(),
+        DefaultForeground = Hex(fg),
+        DefaultBackground = Hex(bg),
+        Cursor = Hex(cursor),
+    };
+
+    private static Color Hex(string h)
+    {
+        h = h.Trim().TrimStart('#');
+        if (h.Length == 3) h = string.Concat(h[0], h[0], h[1], h[1], h[2], h[2]);
+        if (h.Length < 6) return new Color(0, 0, 0);
+        try { return new Color(Convert.ToByte(h[..2], 16), Convert.ToByte(h.Substring(2, 2), 16), Convert.ToByte(h.Substring(4, 2), 16)); }
+        catch { return new Color(0, 0, 0); }
+    }
+
+    /// <summary>Parse a ghostty-format theme file (palette = N=#rrggbb, background/foreground/cursor-color).</summary>
+    private static Theme? ParseGhosttyTheme(string path)
+    {
+        try { return ParseGhosttyTheme(Path.GetFileNameWithoutExtension(path), File.ReadAllLines(path)); }
+        catch { return null; }
+    }
+
+    private static Theme? ParseGhosttyTheme(string name, IEnumerable<string> lines)
+    {
+        try
+        {
+            var pal = Theme.DefaultPalette();
+            Color fg = Color.DefaultForeground, bg = Color.DefaultBackground, cur = new(222, 222, 230);
+            foreach (var raw in lines)
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                int eq = line.IndexOf('='); if (eq <= 0) continue;
+                string key = line[..eq].Trim().ToLowerInvariant(); string val = line[(eq + 1)..].Trim();
+                switch (key)
+                {
+                    case "palette": int c = val.IndexOf('='); if (c > 0 && int.TryParse(val[..c].Trim(), out int pi) && pi is >= 0 and < 16) pal[pi] = Hex(val[(c + 1)..]); break;
+                    case "background": bg = Hex(val); break;
+                    case "foreground": fg = Hex(val); break;
+                    case "cursor-color": cur = Hex(val); break;
+                }
+            }
+            return new Theme { Name = name, Palette = pal, DefaultForeground = fg, DefaultBackground = bg, Cursor = cur };
+        }
+        catch { return null; }
+    }
+
+    // ---- Persistence: workspace/session tree + selection + sidebar state ----
+
+    // The POCOs (AppState / WorkspaceState / SessionState / PaneState) and the serializer live in
+    // Wagterm.Pty.RestoreState so the format has a round-trip test beside it (P3); the format rule
+    // (additive keys, no version, unknown keys ignored, older builds drop them on write-back) is there.
+
+    // Data root: %LOCALAPPDATA%\<instance-id> — "wagterm" for the release, "wagterm-dev" for dev builds,
+    // so the two keep separate config, sessions, themes, keymap, and window library. See Program._appId.
+    private static string AppDir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+    private static string WindowsIndexPath => Path.Combine(AppDir, "windows.json");
+    private static string LegacyStatePath => Path.Combine(AppDir, "state.json");
+    private static string BackgroundsDir => Path.Combine(AppDir, "backgrounds"); // copied per-session watermark images
+    // Per-window tree snapshot. Multi-window (F1b): each window persists to windows/<id>.json.
+    private string StatePath => Path.Combine(AppDir, "windows", Id + ".json");
+
+    /// <summary>Load the window library index; migrate a legacy single-window state.json; ensure it's non-empty.</summary>
+    private static void LoadOrMigrateIndex()
+    {
+        lock (_windowIndex)
+        {
+            _windowIndex.Clear();
+            try
+            {
+                if (File.Exists(WindowsIndexPath))
+                {
+                    var idx = JsonSerializer.Deserialize<WindowsIndexFile>(File.ReadAllText(WindowsIndexPath));
+                    if (idx?.Windows is { Count: > 0 })
+                    {
+                        _windowIndex.AddRange(idx.Windows.Where(m => !string.IsNullOrEmpty(m.Id)));
+                        _frontmostId = idx.Frontmost;
+                    }
+                }
+            }
+            catch { _windowIndex.Clear(); }
+
+            if (_windowIndex.Count == 0)
+            {
+                // Migrate a legacy state.json into windows/<id>.json, or seed a fresh window.
+                var m = new WinMeta { Id = Guid.NewGuid().ToString(), Name = "", IsOpen = true };
+                try
+                {
+                    if (File.Exists(LegacyStatePath))
+                    {
+                        RestoreState.TryDeserialize(File.ReadAllText(LegacyStatePath), out var st);
+                        if (st is not null)
+                        {
+                            m.X = st.WindowX; m.Y = st.WindowY; m.W = st.WindowWidth; m.H = st.WindowHeight; m.Max = st.WindowMaximized;
+                        }
+                        Directory.CreateDirectory(Path.Combine(AppDir, "windows"));
+                        File.Copy(LegacyStatePath, Path.Combine(AppDir, "windows", m.Id + ".json"), overwrite: true);
+                        try { File.Move(LegacyStatePath, LegacyStatePath + ".migrated", overwrite: true); } catch { }
+                    }
+                }
+                catch { }
+                _windowIndex.Add(m);
+                _frontmostId = m.Id;
+            }
+            if (!_windowIndex.Any(w => w.IsOpen)) _windowIndex[0].IsOpen = true;
+            if (_frontmostId is null || !_windowIndex.Any(w => w.Id == _frontmostId))
+                _frontmostId = _windowIndex.First(w => w.IsOpen).Id;
+        }
+    }
+
+    /// <summary>Snapshot the window library to windows.json. Best-effort. The bytes are built here;
+    /// the write goes through <see cref="_stateWriter"/>, off this thread, unless <paramref name="sync"/>
+    /// — the last window out, or every window of an update-quit, writes it synchronously, because the
+    /// process goes right after.</summary>
+    private static void SaveIndex(bool sync = false)
+    {
+        try
+        {
+            List<WinMeta> copy;
+            lock (_windowIndex) copy = _windowIndex.Select(m => new WinMeta { Id = m.Id, Name = m.Name, IsOpen = m.IsOpen, X = m.X, Y = m.Y, W = m.W, H = m.H, Max = m.Max }).ToList();
+            var idx = new WindowsIndexFile { Version = 1, Frontmost = _frontmostId, Windows = copy };
+            string json = JsonSerializer.Serialize(idx, RestoreState.Json);
+            if (sync) _stateWriter.Publish(WindowsIndexPath, json, out _);
+            else _stateWriter.Enqueue(WindowsIndexPath, json);
+        }
+        catch { }
+    }
+
+    /// <summary>Create a Program instance for a library entry and boot its window (UI thread). Seeds if no tree file exists.</summary>
+    private static Program CreateWindowInstance(WinMeta m)
+    {
+        var win = new Program { Id = m.Id, WinName = m.Name };
+        if (m.W > 0 && m.H > 0) { win._geoX = m.X; win._geoY = m.Y; win._geoW = m.W; win._geoH = m.H; win._geoMax = m.Max; win._geoValid = true; }
+        lock (_windowIndex) { _byId[m.Id] = win; if (!_windowIndex.Any(x => x.Id == m.Id)) _windowIndex.Add(m); m.IsOpen = true; }
+        win.Boot(_hInstance);
+        return win;
+    }
+
+    private List<Pane> PanesOf(Ses s) { lock (_workspaces) return s.Panes.ToList(); }
+
+    /// <summary>Whether a pane reconnected to a surviving pty-host session on this restore
+    /// (see <see cref="ServerSession.Adopted"/>) — such panes' shells are LIVE, not fresh.</summary>
+    private static bool IsAdopted(Pane p) => p.S is ServerSession { Adopted: true };
+
+    private static string DenylistPath => Path.Combine(AppDir, "restore-denylist.conf");
+
+    /// <summary>Exe/process names (no extension) that restore-commands never re-runs. Seeds a starter file.</summary>
+    private static HashSet<string> LoadDenylist()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { "powershell", "pwsh", "cmd", "conhost", "wsl", "ssh", "bash", "oh-my-posh", "git", "windowsterminal" };
+        try
+        {
+            string path = DenylistPath;
+            if (!File.Exists(path))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path,
+                    "# wagterm restore-denylist: process/exe names (no extension) NOT re-run on restart.\n" +
+                    "# One per line; '#' starts a comment. Defaults cover shells and prompt helpers.\n" +
+                    "powershell\npwsh\ncmd\nconhost\nwsl\nssh\nbash\noh-my-posh\ngit\nWindowsTerminal\n");
+            }
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                set.Add(StripExe(line));
+            }
+        }
+        catch { }
+        return set;
+    }
+
+    private static string StripExe(string name)
+    {
+        name = name.Trim().Trim('"');
+        int slash = name.LastIndexOfAny(new[] { '\\', '/' });
+        if (slash >= 0) name = name[(slash + 1)..];
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name[..^4];
+        return name;
+    }
+
+    /// <summary>
+    /// Best-effort foreground-command capture: for each shell PID, the command line of its most
+    /// recently started non-denylisted child. One CIM process snapshot for all panes; ~1s at quit.
+    /// A failed query answers an empty map — callers that must tell "nothing running" from "could not
+    /// ask" (restore.capture) use <see cref="TryCaptureForegroundCommands"/>.
+    /// </summary>
+    private static Dictionary<int, string> CaptureForegroundCommands(IEnumerable<int> shellPids, int timeoutMs = 4000)
+    {
+        TryCaptureForegroundCommands(shellPids, timeoutMs, out var result);
+        return result;
+    }
+
+    /// <summary>
+    /// <see cref="CaptureForegroundCommands"/> that also says whether the process query RAN: false
+    /// when powershell could not start, timed out (the process is killed) or returned nothing
+    /// parseable, in which case <paramref name="result"/> is empty and means nothing. True with an
+    /// empty map is the honest "no pane has a non-denylisted child"; no pids at all is true too.
+    /// </summary>
+    private static bool TryCaptureForegroundCommands(IEnumerable<int> shellPids, int timeoutMs, out Dictionary<int, string> result)
+    {
+        result = new Dictionary<int, string>();
+        var pids = shellPids.Distinct().ToHashSet();
+        if (pids.Count == 0) return true;
+        var deny = LoadDenylist();
+        try
+        {
+            if (!TryRunPowerShell("Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{n='C';e={if($_.CreationDate){$_.CreationDate.Ticks}else{0}}} | ConvertTo-Json -Compress",
+                    timeoutMs, out string json)) return false;
+
+            using var doc = JsonDocument.Parse(json);
+            var rows = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray().ToList()
+                : new List<JsonElement> { doc.RootElement };
+            var byParent = new Dictionary<int, List<(long created, string cmd)>>();
+            foreach (var e in rows)
+            {
+                if (e.ValueKind != JsonValueKind.Object) continue;
+                int ppid = e.TryGetProperty("ParentProcessId", out var pv) && pv.TryGetInt32(out var pp) ? pp : -1;
+                if (!pids.Contains(ppid)) continue;
+                string name = e.TryGetProperty("Name", out var nv) && nv.ValueKind == JsonValueKind.String ? (nv.GetString() ?? "") : "";
+                string cmd = e.TryGetProperty("CommandLine", out var cv) && cv.ValueKind == JsonValueKind.String ? (cv.GetString() ?? "") : "";
+                long created = e.TryGetProperty("C", out var tv) && tv.ValueKind == JsonValueKind.Number && tv.TryGetInt64(out var t) ? t : 0;
+                if (cmd.Length == 0 || deny.Contains(StripExe(name))) continue;
+                if (!byParent.TryGetValue(ppid, out var list)) byParent[ppid] = list = new();
+                list.Add((created, cmd));
+            }
+            foreach (var (ppid, list) in byParent)
+                result[ppid] = list.OrderByDescending(x => x.created).First().cmd;
+            return true;
+        }
+        catch { result.Clear(); return false; }
+    }
+
+    /// <summary>
+    /// Run one PowerShell command (no profile) and take its stdout, bounded by <paramref name="timeoutMs"/>.
+    /// False when powershell could not start, timed out (it is killed) or printed nothing.
+    /// </summary>
+    private static bool TryRunPowerShell(string command, int timeoutMs, out string stdout)
+    {
+        stdout = "";
+        var psi = new System.Diagnostics.ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -Command \"" + command + "\"")
+        { RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+        using var proc = System.Diagnostics.Process.Start(psi);
+        if (proc is null) return false;
+        // The read runs CONCURRENTLY with the bounded wait. Read-to-end first and the timeout is
+        // only consulted after the child has already closed stdout — a powershell wedged inside
+        // the CIM query keeps the handle open, so neither the 4 s nor the 15 s bound ever fired
+        // and the caller (a control-pipe thread, for restore.capture) hung with it (revmux r1).
+        // On expiry powershell is killed (the tree flag for any child it did spawn — the WMI
+        // provider host is the WMI service's child, not ours, and never held our pipe), which
+        // closes the last write handle on its stdout so the pending read completes with EOF, and
+        // the partial output is never parsed.
+        var read = proc.StandardOutput.ReadToEndAsync();
+        if (!proc.WaitForExit(timeoutMs))
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { }
+            try { read.Wait(1000); } catch { }
+            return false;
+        }
+        stdout = read.Wait(timeoutMs) ? read.Result : "";
+        return !string.IsNullOrWhiteSpace(stdout);
+    }
+
+    /// <summary>The command lines of just <paramref name="pids"/> (a filtered CIM query, not the full
+    /// snapshot), for the SessionStart binding (#316). A pid that has exited, or a query that failed,
+    /// is simply absent from the map.</summary>
+    private static Dictionary<int, string> QueryCommandLines(IEnumerable<int> pids, int timeoutMs)
+    {
+        var result = new Dictionary<int, string>();
+        var ids = pids.Where(p => p > 0).Distinct().ToList();
+        if (ids.Count == 0) return result;
+        try
+        {
+            string filter = string.Join(" OR ", ids.Select(p => "ProcessId=" + p.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            if (!TryRunPowerShell($"Get-CimInstance Win32_Process -Filter '{filter}' | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
+                    timeoutMs, out string json)) return result;
+            using var doc = JsonDocument.Parse(json);
+            var rows = doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray().ToList()
+                : new List<JsonElement> { doc.RootElement };
+            foreach (var e in rows)
+                if (e.ValueKind == JsonValueKind.Object
+                    && e.TryGetProperty("ProcessId", out var pv) && pv.TryGetInt32(out int pid)
+                    && e.TryGetProperty("CommandLine", out var cv) && cv.ValueKind == JsonValueKind.String)
+                    result[pid] = cv.GetString() ?? "";
+        }
+        catch { result.Clear(); }
+        return result;
+    }
+
+    /// <summary>
+    /// The quit-time capture (WM_DESTROY, restore-commands on): one process snapshot for every real
+    /// pane, written into each pane's <see cref="Pane.CapturedCommand"/> — the same field
+    /// <c>restore capture</c> writes and every save reads. A fresh capture overrides an earlier
+    /// checkpoint, including to empty when nothing is running now. On the UI thread, at quit only.
+    ///
+    /// A query that did NOT run leaves every slot exactly as it was — the rule the verb applies
+    /// (<see cref="RestoreCaptureReply.QueryFailed"/>), applied by the other writer of the same
+    /// field. Before P3 the slot was not durable, so a lost query at quit cost nothing that was not
+    /// already gone; once a `restore capture` checkpoint survives ordinary saves, "empty map for a
+    /// dead query" would erase it at the one moment it exists for (a cold CIM start past the 4 s
+    /// budget at quit is a case the 15 s callers were written for — revmux r1). The checkpoint kept
+    /// is at worst stale, and replay re-checks the denylist; a slot wiped is a replay that never
+    /// happens. Returns whether the query ran, so the caller can log the miss.
+    /// </summary>
+    private bool CaptureCommandsIntoPanes(IEnumerable<Ses> sessions)
+    {
+        var panes = sessions.SelectMany(s => PanesOf(s)).ToList();
+        if (!TryCaptureForegroundCommands(panes.Select(p => p.S.ChildProcessId).Where(id => id is > 0).Select(id => id!.Value), timeoutMs: 4000, out var cmdByPid))
+            return false;   // nothing known, nothing touched: the earlier checkpoints stand
+        foreach (var p in panes)
+            p.CapturedCommand = p.S.ChildProcessId is int pid && cmdByPid.TryGetValue(pid, out var c) ? c : null;
+        return true;
+    }
+
+    // The one writer every window shares (StateWriter has the why: #294, a rename held by an
+    // endpoint-security filter hung the window for as long as the filter took). Snapshots are built
+    // on the UI thread, where the data is; only the file I/O leaves it. A background write's failure
+    // goes to the debug output, where the swallowed failures went before.
+    private static readonly Wagterm.Core.StateWriter _stateWriter =
+        new(TimeSpan.FromMilliseconds(200), m => System.Diagnostics.Debug.WriteLine(m));
+
+    /// <summary>Snapshot the tree/selection/sidebar and hand the bytes to the state writer; this
+    /// thread never waits on the file (#294). No-op while restoring. Returns whether a snapshot was
+    /// taken, not whether it is on disk yet — the UI-thread callers ignore it as they always have; a
+    /// caller whose reply claims a checkpoint on disk uses <see cref="BuildStateSnapshot"/> and
+    /// <see cref="PublishState"/> instead (<see cref="RestoreCapture"/>, #246).
+    /// <paramref name="captureCommands"/> (quit only) first captures each pane's foreground command into its
+    /// <see cref="Pane.CapturedCommand"/> when restore-commands is on; every save then writes that field —
+    /// one slot, one reader, so a `restore capture` checkpoint survives the ordinary saves in between (P3).
+    /// With <paramref name="sync"/> — the last window out, or an update-quit — it is written before
+    /// returning: the process goes right after, and a snapshot still queued is older and fenced out.
+    /// Closing one window of several enqueues like any other save: a synchronous write there would
+    /// stall the UI thread every window shares.</summary>
+    private bool SaveState(bool captureCommands = false, bool sync = false)
+    {
+        string? json = BuildStateSnapshot(out _, captureCommands);
+        if (json is null) return false;
+        if (sync)
+        {
+            bool ok = _stateWriter.Publish(StatePath, json, out _);
+            SaveIndex(sync: true);
+            return ok;
+        }
+        _stateWriter.Enqueue(StatePath, json);
+        SaveIndex();
+        return true;
+    }
+
+    /// <summary>Write a snapshot from <see cref="BuildStateSnapshot"/> NOW, on this thread, with the
+    /// reason it did not land. <paramref name="stamp"/> comes from <see cref="Core.StateWriter.Reserve"/>
+    /// taken in the same UI hop as the build, so the snapshot's place in the order is the moment it
+    /// was built, not the moment this thread got to write it: a newer snapshot the UI thread queued in
+    /// between wins, whichever lands first. The hop saves the index itself.</summary>
+    private bool PublishState(string json, long stamp, out string? why) => _stateWriter.Publish(StatePath, json, stamp, out why);
+
+    /// <summary>The state file's bytes for the tree as it is now (UI thread: it reads the workspaces,
+    /// the panes' cwds and, with restore-buffer, their emulators). Null, with <paramref name="why"/>,
+    /// when there is nothing to save (a quick window, a restore in progress) or the snapshot failed.</summary>
+    private string? BuildStateSnapshot(out string? why, bool captureCommands = false)
+    {
+        why = null;
+        if (_isQuickWindow) { why = "quick terminal is not restored"; return null; }
+        if (_restoring) { why = "the window is still restoring its saved state"; return null; }
+        try
+        {
+            // Snapshot rows under the workspaces lock, then read each cwd (which locks the
+            // session) OUTSIDE that lock to keep lock ordering consistent.
+            List<(string id, string name, bool expanded, string? defaultDir, List<Ses> sessions)> rows;
+            lock (_workspaces)
+                rows = _workspaces.Select(w => (w.Id, w.Name, w.Expanded, w.DefaultDir, w.Sessions.ToList())).ToList();
+            string? activeId = _active?.Id;
+
+            if (captureCommands && _config.RestoreCommands && !CaptureCommandsIntoPanes(rows.SelectMany(r => r.sessions)))
+                System.Diagnostics.Debug.WriteLine("quit-time command capture did not run; the earlier restore checkpoints were kept as they were");
+
+            var st = new AppState
+            {
+                ActiveId = activeId,
+                SidebarWidth = _sidebarWShown,   // the shown width even while hidden: a `sidebar width` set while hidden survives a restart
+                SidebarVisible = _sidebarW > 0,
+                SidebarMode = _sidebarMode == SidebarMode.Flagged ? "flagged" : "tree",
+                FocusedWorkspaceId = _focusedWorkspaceId,
+                Mru = _mru.ToList(),   // Ctrl+Tab recency order survives relaunch
+            };
+            CaptureGeometry(st);
+            foreach (var (id, name, expanded, defaultDir, sessions) in rows)
+            {
+                var wss = new WorkspaceState { Id = id, Name = name, Expanded = expanded, DefaultDir = defaultDir };
+                foreach (var s in sessions)
+                {
+                    var ss = new SessionState
+                    {
+                        Id = s.Id,
+                        Name = s.Name,
+                        CustomName = s.CustomName,
+                        Context = s.Context,   // P3: null = no key written (RestoreState explains why)
+                        Profile = s.ProfileName,
+                        Active = s.Active,
+                        Flagged = s.Flagged,
+                        BgFile = s.BgPath is null ? null : Path.GetFileName(s.BgPath),
+                        BgOpacity = s.BgOpacity,
+                        BgMode = s.BgMode,
+                        Link = s.Link,   // null = no key written
+                    };
+                    List<Pane> panes;
+                    lock (_workspaces) panes = s.Panes.ToList();
+                    foreach (var p in panes)
+                    {
+                        string live = PrettyCwd(SafeCwd(p));                       // OSC 7 cwd if the shell reports it
+                        string cwd = live.Length > 0 ? live : (p.StartCwd ?? ""); // else the launch dir
+                        string cmd = p.CapturedCommand ?? "";   // the durable slot; "" on disk = none (RestoreState)
+                        List<string>? buf = null;
+                        string? blob = null;
+                        if (_config.RestoreBuffer)
+                            try
+                            {
+                                lock (p.S.SyncRoot)
+                                {
+                                    buf = p.S.Emulator.DumpBuffer().TakeLast(500).ToList();   // plain-text fallback
+                                    // Full-fidelity attributed blob (colours + styles survive restore). Only the
+                                    // managed core is a TerminalEmulator; a server/rust pane keeps the text path.
+                                    if (p.S.Emulator is TerminalEmulator te)
+                                        blob = Convert.ToBase64String(BufferPersist.Serialize(te));
+                                }
+                            }
+                            catch { }
+                        ss.Panes.Add(new PaneState { Id = p.Id, Cwd = cwd, FontSize = p.FontSize, FontZoomed = p.FontZoomed, Ratio = p.Ratio, Command = cmd, AgentResume = p.AgentResume, RestoreCommand = p.RestoreCommand, Buffer = buf, BufferBlob = blob });
+                    }
+                    // P4: the axis, written only for a split horizontal session (StoreAxis) — a vertical or
+                    // single-pane session writes no key, so its bytes are what 0.17.12 wrote.
+                    ss.Axis = RestoreState.StoreAxis(panes.Count, s.Axis);
+                    wss.Sessions.Add(ss);
+                }
+                st.Workspaces.Add(wss);
+            }
+
+            // Mirror name + geometry into the window-library entry so windows.json can position the
+            // window at next launch without loading the per-window tree first (the caller saves it).
+            lock (_windowIndex)
+            {
+                var meta = _windowIndex.FirstOrDefault(m => m.Id == Id);
+                if (meta is not null)
+                {
+                    meta.Name = WinName;
+                    if (st.WindowWidth > 0) { meta.X = st.WindowX; meta.Y = st.WindowY; meta.W = st.WindowWidth; meta.H = st.WindowHeight; meta.Max = st.WindowMaximized; }
+                }
+            }
+            return RestoreState.Serialize(st);
+        }
+        catch (Exception ex) { why = ex.Message; return null; }   // persistence is best-effort for the UI callers
+    }
+
+    // Window geometry loaded from state.json at startup (applied at window creation).
+    private bool _geoValid;
+    private int _geoX, _geoY, _geoW, _geoH;
+    private bool _geoMax;
+    private bool _wasMaximized;
+    private bool _sizing;                 // inside an interactive resize drag (WM_ENTER/EXITSIZEMOVE)
+    private bool _windowActive = true;   // window focus state (drives unfocused-dim)
+
+    // ---- Fullscreen (F11 / toggle_fullscreen): borderless over the whole monitor ----
+    private bool _fullscreen;
+    private WINDOWPLACEMENT _fsPrev;
+
+    private void ToggleFullscreen()
+    {
+        long style = (long)GetWindowLongPtrW(_hwnd, GWL_STYLE);
+        if (!_fullscreen)
+        {
+            _fsPrev = new WINDOWPLACEMENT { length = System.Runtime.InteropServices.Marshal.SizeOf<WINDOWPLACEMENT>() };
+            GetWindowPlacement(_hwnd, ref _fsPrev);
+            var mi = new MONITORINFO { cbSize = System.Runtime.InteropServices.Marshal.SizeOf<MONITORINFO>() };
+            GetMonitorInfoW(MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST), ref mi);
+            SetWindowLongPtrW(_hwnd, GWL_STYLE, (IntPtr)((style & ~(long)WS_OVERLAPPEDWINDOW) | WS_POPUP));
+            SetWindowPos(_hwnd, IntPtr.Zero, mi.rcMonitor.left, mi.rcMonitor.top,
+                mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOZORDER);
+            _fullscreen = true;
+        }
+        else
+        {
+            SetWindowLongPtrW(_hwnd, GWL_STYLE, (IntPtr)((style & ~(long)WS_POPUP) | WS_OVERLAPPEDWINDOW));
+            SetWindowPlacement(_hwnd, ref _fsPrev);
+            SetWindowPos(_hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+            _fullscreen = false;
+        }
+        RequestRedraw();
+    }
+
+    /// <summary>Fill AppState with the window's restore rect + maximized flag (GetWindowPlacement).</summary>
+    private void CaptureGeometry(AppState st)
+    {
+        try
+        {
+            if (_hwnd == IntPtr.Zero) return;
+            var wp = new WINDOWPLACEMENT { length = System.Runtime.InteropServices.Marshal.SizeOf<WINDOWPLACEMENT>() };
+            if (!GetWindowPlacement(_hwnd, ref wp)) return;
+            var r = wp.rcNormalPosition;                 // restore rect even when maximized
+            st.WindowX = r.left; st.WindowY = r.top;
+            st.WindowWidth = r.right - r.left; st.WindowHeight = r.bottom - r.top;
+            st.WindowMaximized = wp.showCmd == SW_MAXIMIZE; // SW_SHOWMAXIMIZED == 3
+        }
+        catch { }
+    }
+
+    /// <summary>Rebuild the tree from state.json via the normal Create* paths. Returns false to fall back to a default.</summary>
+    private bool TryRestoreState()
+    {
+        AppState? st;
+        try
+        {
+            string path = StatePath;
+            if (!File.Exists(path)) return false;
+            if (!RestoreState.TryDeserialize(File.ReadAllText(path), out st)) throw new FormatException();
+        }
+        catch
+        {
+            try { File.Move(StatePath, StatePath + ".bad", overwrite: true); } catch { } // keep the corrupt file for inspection
+            return false;
+        }
+        if (st?.Workspaces is null || !st.Workspaces.Any(w => w.Sessions is { Count: > 0 })) return false;
+
+        _restoring = true;
+        try
+        {
+            // A hand-edited or pre-P2 file may carry a width the chrome cannot draw (0 was what a
+            // hidden sidebar used to save); that falls back to the default rather than to a 3-DIP tree.
+            _sidebarWShown = Wagterm.Pty.SidebarWidths.InRange((long)st.SidebarWidth) ? st.SidebarWidth : SidebarWFull;
+            _sidebarW = st.SidebarVisible ? _sidebarWShown : 0;
+            foreach (var w in st.Workspaces)
+            {
+                // Recreate every saved workspace, including empty ones (agterm keeps empty workspaces).
+                // StableWorkspaceId folds any duplicate id already restored this pass onto a fresh one.
+                var ws = CreateWorkspace(StableWorkspaceId(w.Id), w.Name);
+                ws.DefaultDir = string.IsNullOrWhiteSpace(w.DefaultDir) ? null : w.DefaultDir;
+                foreach (var s in w.Sessions ?? new List<SessionState>())
+                {
+                    // Back-compat: a pre-splits session has no Panes — synthesize one from its Cwd/FontSize.
+                    var pl = (s.Panes is { Count: > 0 })
+                        ? s.Panes
+                        : new List<PaneState> { new() { Id = s.Id, Cwd = s.Cwd, FontSize = s.FontSize, Ratio = 1f } };
+                    // Two panes per session (P4): the model is primary + split and the axis is per session.
+                    // A hand-edited or foreign file with more restores the first two; the rest are dropped
+                    // and said so — the loop below being written for N was never a feature.
+                    if (pl.Count > 2)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"restore: session {s.Id} lists {pl.Count} panes; the first two were restored and {pl.Count - 2} dropped (two panes per session)");
+                        pl = pl.Take(2).ToList();
+                    }
+                    var first = pl[0];
+                    // Durable ids (P4): pane 0 is created under its SAVED id, not the session id. After a
+                    // `session swap` the pane carrying the session id sits in slot 1, and re-minting pane 0 as
+                    // the session id would duplicate it and rename the other shell; StablePaneId folds only
+                    // an empty id, the file's session id (which follows StableSessionId) and a live duplicate.
+                    string sid = StableSessionId(s.Id);
+                    var ses = CreateSession(
+                        sid,
+                        string.IsNullOrWhiteSpace(s.Name) ? null : s.Name,
+                        string.IsNullOrWhiteSpace(first.Cwd) ? null : first.Cwd,
+                        ws, makeActive: s.Id == st.ActiveId,
+                        fontSize: PaneFontSize.Restore(first.FontSize, (float)_config.FontSize, first.FontZoomed).Size,
+                        profileName: string.IsNullOrWhiteSpace(s.Profile) ? null : s.Profile,
+                        paneId: StablePaneId(first.Id, s.Id, sid, first: true));
+                    // The axis BEFORE the second pane exists (P4). Every pty is spawned at the full content
+                    // grid (CreatePane → GridSizeFor) and then RegridSession below sizes each one from
+                    // PaneLayout, which reads ses.Axis: a horizontal session must get its rows halved, not
+                    // its columns, the first time its grids are set — the grid a restored pane is given is
+                    // the axis's grid (#209's surface: an ADOPTED split pane's box always differs from the
+                    // full grid on either axis, so its Resize is sent as before; a single pane is unchanged).
+                    // Only a split session carries an axis: a single-pane file's key is ignored and, since
+                    // StoreAxis writes none for one pane, never written back.
+                    if (pl.Count > 1) ses.Axis = RestoreState.LoadAxis(s.Axis);
+                    for (int i = 1; i < pl.Count; i++)
+                        AppendPane(ses,
+                            StablePaneId(pl[i].Id, s.Id, sid, first: false),   // verbatim: after a swap this is the pane that carries the session id
+                            string.IsNullOrWhiteSpace(pl[i].Cwd) ? null : pl[i].Cwd,
+                            PaneFontSize.Restore(pl[i].FontSize, (float)_config.FontSize, pl[i].FontZoomed).Size);
+                    lock (_workspaces)
+                    {
+                        for (int i = 0; i < pl.Count && i < ses.Panes.Count; i++)
+                        {
+                            ses.Panes[i].FontZoomed = PaneFontSize.Restore(pl[i].FontSize, (float)_config.FontSize, pl[i].FontZoomed).Zoomed;
+                            ses.Panes[i].Ratio = pl[i].Ratio > 0 ? pl[i].Ratio : 1f;
+                            ses.Panes[i].AgentResume = string.IsNullOrWhiteSpace(pl[i].AgentResume) ? null : pl[i].AgentResume;
+                            ses.Panes[i].RestoreCommand = string.IsNullOrWhiteSpace(pl[i].RestoreCommand) ? null : pl[i].RestoreCommand;
+                            // The captured slot comes back too, so it is readable (tree's capturedCommands) before it
+                            // is replayed and survives the save at the end of this restore — before P3 that save
+                            // wrote "" over it (P3). Validated at replay (denylist), not here: it is a command line.
+                            ses.Panes[i].CapturedCommand = string.IsNullOrWhiteSpace(pl[i].Command) ? null : pl[i].Command;
+                        }
+                        ses.Active = Math.Clamp(s.Active, 0, ses.Panes.Count - 1);
+                    }
+                    // Buffer-content restore: seed each pane's scrollback (dimmed) above the fresh shell.
+                    // ADOPTED panes skip it — they reconnected to the live session, whose real (and
+                    // fresher) scrollback came with the attach; seeding would duplicate it.
+                    if (_config.RestoreBuffer)
+                        lock (_workspaces)
+                            for (int i = 0; i < pl.Count && i < ses.Panes.Count; i++)
+                            {
+                                var pane = ses.Panes[i];
+                                if (IsAdopted(pane)) continue;
+                                // Prefer the full-fidelity attributed blob; fall back to plain text.
+                                if (pl[i].BufferBlob is { Length: > 0 } b64 && pane.S.Emulator is TerminalEmulator te
+                                    && BufferPersist.TryParse(Convert.FromBase64String(b64), out var pbuf))
+                                {
+                                    lock (pane.S.SyncRoot)
+                                    {
+                                        BufferPersist.Restore(te, pbuf);
+                                        te.SeedScrollback(new[] { "──── restored ────" });
+                                    }
+                                }
+                                else if (pl[i].Buffer is { Count: > 0 } b)
+                                {
+                                    var seed = new List<string>(b) { "──── restored ────" };
+                                    lock (pane.S.SyncRoot) pane.S.Emulator.SeedScrollback(seed);
+                                }
+                            }
+                    ses.Flagged = s.Flagged;
+                    ses.CustomName = string.IsNullOrWhiteSpace(s.CustomName) ? null : s.CustomName;
+                    ses.Link = RestoreState.LoadLink(s.Link);   // validated like the context: a non-http(s) value is dropped
+                    ses.Context = RestoreState.LoadContext(s.Context); // validated, not trusted: an out-of-rules value is dropped, not shown
+                    if (!string.IsNullOrEmpty(s.BgFile)) // restore the watermark if its copied file still exists
+                    {
+                        string bg = Path.Combine(BackgroundsDir, s.BgFile!);
+                        if (File.Exists(bg)) { ses.BgPath = bg; ses.BgOpacity = s.BgOpacity; ses.BgMode = string.IsNullOrWhiteSpace(s.BgMode) ? "fit" : s.BgMode; }
+                    }
+                    if (ReferenceEquals(_active, ses)) _session = ses.S;
+                    RegridSession(ses);
+
+                    // First-class agent resume (always on, independent of restore-commands): re-launch each
+                    // pane's bound resumable agent once the shell is ready. The agent's launcher wrapper
+                    // (see ClaudeIntegration) re-binds to the same stable pane id and resumes its own session.
+                    for (int i = 0; i < pl.Count && i < ses.Panes.Count; i++)
+                    {
+                        string agent = pl[i].AgentResume ?? "";
+                        if (agent.Length == 0) continue;
+                        var apane = ses.Panes[i];
+                        // An ADOPTED pane's agent is STILL RUNNING — typing `claude --resume ...`
+                        // into it would land in the live agent's prompt. The binding stays for
+                        // future (non-adopted) restarts; nothing to relaunch now.
+                        if (IsAdopted(apane)) continue;
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(2500); // let the shell/profile settle so the wrapper function is defined
+                            try { apane.S.Write(System.Text.Encoding.UTF8.GetBytes(agent + "\r")); } catch { }
+                        });
+                    }
+
+                    // Pinned restore command (agterm #271): always re-run on restart, independent of the
+                    // restore-commands toggle — an explicit per-pane opt-in that overrides auto-capture.
+                    for (int i = 0; i < pl.Count && i < ses.Panes.Count; i++)
+                    {
+                        string pin = pl[i].RestoreCommand ?? "";
+                        if (pin.Length == 0 || !string.IsNullOrWhiteSpace(pl[i].AgentResume)) continue;
+                        if (IsAdopted(ses.Panes[i])) continue;   // still running — don't double-launch
+                        var rpane = ses.Panes[i];
+                        _ = Task.Run(async () =>
+                        {
+                            await Task.Delay(2500);
+                            try { rpane.S.Write(System.Text.Encoding.UTF8.GetBytes(pin + "\r")); } catch { }
+                        });
+                    }
+
+                    // Opt-in: re-run each pane's captured foreground command once the shell is ready.
+                    if (_config.RestoreCommands)
+                    {
+                        var deny = LoadDenylist();
+                        for (int i = 0; i < pl.Count && i < ses.Panes.Count; i++)
+                        {
+                            if (!string.IsNullOrWhiteSpace(pl[i].AgentResume)) continue; // agent panes handled above
+                            if (!string.IsNullOrWhiteSpace(pl[i].RestoreCommand)) continue; // pinned command handled above
+                            if (IsAdopted(ses.Panes[i])) continue;   // the captured command is still running
+                            string cmd = pl[i].Command ?? "";
+                            if (cmd.Length == 0) continue;
+                            string lead = StripExe(cmd.TrimStart('"').Split(' ', 2)[0]);
+                            if (deny.Contains(lead)) continue;
+                            var pane = ses.Panes[i];
+                            // Prefix the call operator: a captured command line starts with a quoted exe
+                            // path, which pwsh would otherwise parse as a bare string literal.
+                            string run = "& " + cmd;
+                            _ = Task.Run(async () =>
+                            {
+                                await Task.Delay(2500); // let the shell/profile settle; pwsh buffers stdin until ready
+                                try { pane.S.Write(System.Text.Encoding.UTF8.GetBytes(run + "\r")); } catch { }
+                            });
+                        }
+                    }
+                }
+                lock (_workspaces) ws.Expanded = w.Expanded; // CreateSession forces Expanded=true; restore the saved state
+            }
+        }
+        finally { _restoring = false; }
+
+        // Restore sidebar mode + workspace focus (Wave D1). Focus that no longer resolves is dropped.
+        _sidebarMode = string.Equals(st.SidebarMode, "flagged", StringComparison.OrdinalIgnoreCase) ? SidebarMode.Flagged : SidebarMode.Tree;
+        _focusedWorkspaceId = st.FocusedWorkspaceId;
+        if (st.Mru is { Count: > 0 }) { _mru.Clear(); _mru.AddRange(st.Mru); } // EnsureMru prunes dead ids on first walk
+        if (_focusedWorkspaceId is not null)
+            lock (_workspaces) if (!_workspaces.Any(w => w.Id == _focusedWorkspaceId)) _focusedWorkspaceId = null;
+
+        if (_active is null) { var f = AllSessions().FirstOrDefault(); if (f is not null) SetActive(f); }
+        if (AllSessions().Count == 0) return false; // nothing usable came back -> default
+        SaveState();
+        RequestRedraw();
+        return true;
+    }
+
+    private static string ConfigPath => Path.Combine(AppDir, "wagterm.conf");
+
+    private static TerminalConfig LoadOrCreateConfig()
+    {
+        try
+        {
+            string path = ConfigPath;
+            if (!File.Exists(path))
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+                File.WriteAllText(path, SeedConfigText());
+            }
+            return TerminalConfig.Load(path);
+        }
+        catch { return new TerminalConfig(); }
+    }
+
+    // The first-run config template. Honors --default-session-host (the installer passes
+    // "server-rust" so a fresh install defaults new sessions to the Rust pty-host) without
+    // touching the compiled global default — existing configs are never rewritten, and the
+    // Settings UI stays authoritative from then on. Unknown values leave the template as-is.
+    private static string SeedConfigText()
+    {
+        string text = TerminalConfig.DefaultText;
+        if (_argDefaultSessionHost is "in-process" or "server" or "server-rust")
+            text = System.Text.RegularExpressions.Regex.Replace(
+                text, @"(?m)^(\s*session-host\s*=).*$", "$1 " + _argDefaultSessionHost);
+        return text;
+    }
+}

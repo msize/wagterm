@@ -3,7 +3,7 @@
 Both terminals interpret `session new --command` as Windows PowerShell code:
 
 ```powershell
-agwintermctl session new --name build --command "Write-Output 'starting'; npm test"
+wagtermctl session new --name build --command "Write-Output 'starting'; npm test"
 ```
 
 The command runs after the PowerShell profile loads. When it finishes, the pane has
@@ -14,7 +14,7 @@ PowerShell `exit` ends the interpreter. A standalone exited pane retains its out
 To launch an executable and its arguments with no added shell, use:
 
 ```powershell
-agwintermctl session new --name tool --command-mode direct --command 'tool.exe "a b"'
+wagtermctl session new --name tool --command-mode direct --command 'tool.exe "a b"'
 ```
 
 Direct mode uses Windows command-line quoting, including escaped quotes, empty
@@ -36,7 +36,7 @@ Use a helper script for longer startup sequences.
 For a portable `workbench.cmd`, keep startup logic in a `.ps1` beside the batch file:
 
 ```cmd
-agwintermctl session new --name Claude --cwd "%~dp0." --command "powershell.exe -NoLogo -NoExit -File .\workbench-pane.ps1 -Agent claude"
+wagtermctl session new --name Claude --cwd "%~dp0." --command "powershell.exe -NoLogo -NoExit -File .\workbench-pane.ps1 -Agent claude"
 ```
 
 The trailing dot in `%~dp0.` avoids a trailing-backslash quoting trap. This explicit
@@ -44,8 +44,8 @@ PowerShell recipe also works with the already-released 0.18.0 applications, whos
 implicit command defaults differ. For a helper filename containing spaces, quote
 it as PowerShell code (single quotes inside the command string).
 
-Migration from agwinterm 0.18.0: add `--command-mode direct` to callers that depend
-on direct process lifetime or argv parsing. Use a matching updated `agwintermctl`
+Migration from wagterm 0.18.0: add `--command-mode direct` to callers that depend
+on direct process lifetime or argv parsing. Use a matching updated `wagtermctl`
 and terminal; older CLIs do not send the new option. Lite's ordinary PowerShell
 command behavior remains the same. These rules apply to `session new`; overlays,
 shell profiles, custom commands and restore replay retain their separate contracts.

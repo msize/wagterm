@@ -1,0 +1,743 @@
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using Wagterm.Core;
+using Wagterm.Pty;
+using SharpGen.Runtime;
+using Vortice.Direct2D1;
+using Vortice.DirectWrite;
+using Vortice.DCommon;
+using Vortice.Mathematics;
+using static Wagterm.Win32.Win32;
+using Color = Wagterm.Core.Color;
+
+namespace Wagterm.Win32;
+
+/// <summary>The window procedure: WM_* dispatch for every Program window.</summary>
+internal partial class Program
+{
+    private static IntPtr WindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        // Resolve the owning instance by HWND; during CreateWindowExW it isn't registered yet, so
+        // fall back to the instance currently booting (and register it on the first message).
+        if (!_registry.TryGetValue(hwnd, out Program? inst))
+        {
+            inst = _creating;
+            if (inst is not null) { inst._hwnd = hwnd; _registry[hwnd] = inst; }
+        }
+        if (inst is null) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        try
+        {
+            IntPtr r = inst.WindowProcCore(hwnd, msg, wParam, lParam);
+            if (msg == 0x0082 /* WM_NCDESTROY */) _registry.Remove(hwnd);
+            return r;
+        }
+        catch (Exception ex) { Perf($"wndproc ex msg=0x{msg:X}: {ex.GetType().Name} {ex.Message}"); return DefWindowProcW(hwnd, msg, wParam, lParam); }
+    }
+
+    private IntPtr WindowProcCore(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        if (PickerMessage(msg, wParam, lParam)) return IntPtr.Zero;
+        if (_isQuickWindow)
+        {
+            if (msg == WM_CLOSE) { DismissQuick(); return IntPtr.Zero; }
+            if (msg == WM_NCHITTEST) return (IntPtr)HTCLIENT;
+            if (msg == WM_NCCALCSIZE) return IntPtr.Zero;
+            if (msg == QuickHotkeyMessage)
+            {
+                if ((int)wParam == _quickHotkeyId && _quickHotkeyId != 0) QuickOp("toggle", global: true);
+                return IntPtr.Zero;
+            }
+            if (msg == WM_DESTROY) { _uia.Dispose(); _uiGone.Cancel(); return IntPtr.Zero; }
+        }
+        switch (msg)
+        {
+            case 0x003D: // WM_GETOBJECT — expose the terminal to screen readers (UIA, T2-14)
+                { nint r = _uia.OnGetObject(hwnd, wParam, lParam); if (r != 0) return r; break; }
+
+            case WM_NCCALCSIZE:
+                if (wParam != IntPtr.Zero) { AdjustClientRect(hwnd, lParam); return IntPtr.Zero; }
+                break;
+
+            case WM_NCHITTEST:
+                return (IntPtr)HitTest(hwnd, LoWord(lParam), HiWord(lParam));
+
+            case WM_NCMOUSELEAVE:
+                if (_hoverCaption != 0) { _hoverCaption = 0; RequestRedraw(); }
+                break;
+
+            case WM_MOUSELEAVE:
+                _mouseTracking = false;
+                DismissHoverTip();
+                if (_hotBtn is not null) { _hotBtn = null; SetTimer(hwnd, (IntPtr)HoverTimer, 15, IntPtr.Zero); RequestRedraw(); }
+                return IntPtr.Zero;
+
+            case WM_NCLBUTTONDOWN:
+                {
+                    int ht = (int)wParam;
+                    // Consume caption-button presses so DefWindowProc doesn't start its own
+                    // (unreliable) loop; we perform min/max/close ourselves on button-up.
+                    if (ht == HTMINBUTTON || ht == HTMAXBUTTON || ht == HTCLOSE) { _capPressed = ht; RequestRedraw(); return IntPtr.Zero; }
+                    break; // HTCAPTION drag / HTTOP.. resize -> DefWindowProc
+                }
+            case WM_NCLBUTTONUP:
+                {
+                    int ht = (int)wParam;
+                    if (_capPressed != 0)
+                    {
+                        int pressed = _capPressed; _capPressed = 0; RequestRedraw();
+                        if (ht == pressed)
+                        {
+                            if (pressed == HTMINBUTTON) ShowWindow(hwnd, SW_MINIMIZE);
+                            else if (pressed == HTMAXBUTTON) ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+                            else if (pressed == HTCLOSE) PostMessageW(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                        }
+                        return IntPtr.Zero;
+                    }
+                    break;
+                }
+
+            case WM_COMMAND:
+                if (LoWord(wParam) == EDIT_ID && HiWord(wParam) == EN_KILLFOCUS) CommitRename();
+                return IntPtr.Zero;
+
+            case WM_SYSCOMMAND:
+                // The OS menu mode a lone Alt or F10 would enter: there is no OS menu here (the bar in
+                // the title bar is our own, MenuBar.cs), and swallowing it keeps a stray Alt from
+                // parking the keyboard in an invisible mode. Alt+Space still reaches the system menu.
+                if (((long)wParam & 0xFFF0) == SC_KEYMENU && (int)lParam != ' ') return IntPtr.Zero;
+                break;
+
+            case WM_CTLCOLOREDIT: // highlight-matching background + white text (wParam = HDC)
+                SetTextColor(wParam, RGB(255, 255, 255));
+                SetBkColor(wParam, RGB(41, 51, 64));
+                return _editBrush;
+
+            case WM_DROPFILES:
+                {
+                    // Files/folders dropped onto the window: paste their quoted paths (space-joined)
+                    // into the pane under the drop point — via PasteTextInto, so bracketed paste
+                    // applies and the text can't auto-execute.
+                    IntPtr hDrop = wParam;
+                    try
+                    {
+                        DragQueryPoint(hDrop, out POINT dp);
+                        uint n = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+                        var paths = new List<string>();
+                        for (uint i = 0; i < n; i++)
+                        {
+                            uint len = DragQueryFileW(hDrop, i, null, 0);
+                            if (len == 0) continue;
+                            var sb = new StringBuilder((int)len + 1);
+                            if (DragQueryFileW(hDrop, i, sb, len + 1) > 0) paths.Add(sb.ToString());
+                        }
+                        if (paths.Count > 0)
+                        {
+                            string text = string.Join(" ", paths.Select(p => p.IndexOfAny(new[] { ' ', '\'', '(', ')', '&', ';' }) >= 0 ? "\"" + p + "\"" : p));
+                            var target = PaneAt(dp.x, dp.y)?.pane ?? ActiveSurface();
+                            if (target is not null) PasteTextInto(target, text);
+                        }
+                    }
+                    finally { DragFinish(hDrop); }
+                    return IntPtr.Zero;
+                }
+
+            case WM_CONTEXTMENU:
+                {
+                    int sx = LoWord(lParam), sy = HiWord(lParam);
+                    var pt = new POINT { x = sx, y = sy };
+                    if (sx == -1 && sy == -1) { GetCursorScreen(out sx, out sy); pt.x = sx; pt.y = sy; } // keyboard menu key
+                    ScreenToClient(hwnd, ref pt);
+                    pt.x = ToDip(pt.x); pt.y = ToDip(pt.y);   // sx/sy stay SCREEN px (the menu is placed with them)
+                    if (pt.x < (int)_sidebarW && pt.y >= (int)TitleBarH)
+                    {
+                        var item = RowAt(pt.y);
+                        if (item is not null) ShowContextMenuWindow(item, sx, sy);   // screen coords
+                        return IntPtr.Zero;
+                    }
+                    break;
+                }
+
+            case WM_PAINT:
+                BeginPaint(hwnd, out PAINTSTRUCT ps);
+                Render();
+                _lastPaintTick = Environment.TickCount64;
+                UpdateCaretPos();   // keep the (hidden) system caret on the text cursor for a11y follow
+                EndPaint(hwnd, ref ps);
+                return IntPtr.Zero;
+
+            case WM_SETFOCUS:
+                EnsureCaret();
+                return IntPtr.Zero;
+
+            case WM_KILLFOCUS:
+                if (_isQuickWindow) ReleaseQuickKeys();
+                _altArmed = false;
+                DropCaret();
+                return IntPtr.Zero;
+
+            case WM_APP_REDRAW:
+                {
+                    System.Threading.Interlocked.Exchange(ref _redrawPending, 0);
+                    // Frame cap (RedrawMinIntervalMs): paint immediately when quiet; under sustained
+                    // output defer to a one-shot timer so floods render at ~66fps instead of per chunk.
+                    long since = Environment.TickCount64 - _lastPaintTick;
+                    if (since >= RedrawMinIntervalMs) InvalidateRect(hwnd, IntPtr.Zero, false);
+                    else if (!_redrawTimerArmed)
+                    {
+                        _redrawTimerArmed = true;
+                        SetTimer(hwnd, (IntPtr)RedrawTimer, (uint)Math.Max(1, RedrawMinIntervalMs - (int)since), IntPtr.Zero);
+                    }
+                    // Screen reader active: (re)arm the announce debounce — speaks once output settles.
+                    if (Uia.ClientsListening) SetTimer(hwnd, (IntPtr)UiaAnnounceTimer, UiaAnnounceQuietMs, IntPtr.Zero);
+                    return IntPtr.Zero;
+                }
+
+            case WM_APP_ACTION:
+                while (_uiActions.TryDequeue(out var act))
+                    try { act.RunIfQueued(); } catch (Exception ex) { Perf($"uiaction ex: {ex.Message}"); }
+                return IntPtr.Zero;
+
+            case WM_APP_SYNC:
+                try { _syncResult = _syncFn?.Invoke() ?? ""; } catch (Exception ex) { _syncResult = ""; Perf($"sync ex: {ex.Message}"); }
+                return IntPtr.Zero;
+
+            case WM_TIMER:
+                if ((int)wParam == HudTimer) { HudTick(); return IntPtr.Zero; }
+                if ((int)wParam == 2) { _toastText = null; _toastTarget = null; KillTimer(hwnd, (IntPtr)2); InvalidateRect(hwnd, IntPtr.Zero, false); return IntPtr.Zero; }
+                if ((int)wParam == SelAutoTimer) { SelAutoscrollTick(); return IntPtr.Zero; }
+                if ((int)wParam == HoverTimer) { HoverTick(); return IntPtr.Zero; }
+                if ((int)wParam == TipTimer) { TipTick(); return IntPtr.Zero; }
+                if ((int)wParam == PromptPreviewTimer) { PromptPreviewTick(); return IntPtr.Zero; }
+                if ((int)wParam == RedrawTimer)
+                {
+                    KillTimer(hwnd, (IntPtr)RedrawTimer); _redrawTimerArmed = false;
+                    InvalidateRect(hwnd, IntPtr.Zero, false);
+                    return IntPtr.Zero;
+                }
+                if ((int)wParam == UiaAnnounceTimer)
+                {
+                    KillTimer(hwnd, (IntPtr)UiaAnnounceTimer);
+                    AnnounceNewOutput();
+                    return IntPtr.Zero;
+                }
+                if ((int)wParam == BellFlashTimer)
+                {
+                    KillTimer(hwnd, (IntPtr)BellFlashTimer);
+                    RequestRedraw();   // repaint once the flash window has elapsed to clear the overlay
+                    return IntPtr.Zero;
+                }
+                _cursorOn = !_cursorOn;
+                InvalidateRect(hwnd, IntPtr.Zero, false);
+                return IntPtr.Zero;
+
+            // A monitor was attached or detached, or the window crossed to a screen with a different
+            // scaling. PER_MONITOR_AWARE_V2 means Windows will NOT resize or rescale us — it only
+            // tells us, and hands over the rect it thinks we should occupy. Ignoring it (which is
+            // what happened before) leaves the window at its old PIXEL size and the UI at its old
+            // scale: unplug a 100% monitor from a 150% laptop and the whole terminal goes small.
+            case WM_DPICHANGED:
+                {
+                    _dpi = (ushort)((long)wParam & 0xFFFF);       // wParam packs the new DPI in both words
+                    if (_dpi <= 0) _dpi = 96f;
+                    if (_rt is not null) _rt.Dpi = new Vortice.Mathematics.Size(_dpi, _dpi);
+                    if (_isQuickWindow)
+                    {
+                        // Quick geometry is a physical monitor percentage, not a logical normal
+                        // window size. Do not scale PositionQuick's already-sized rectangle again.
+                        RegridCover(); RequestRedraw(); return IntPtr.Zero;
+                    }
+                    // Take the SUGGESTED rect. It is the contract for this message: it already accounts
+                    // for the new scaling, and a window that sizes itself here instead lands wrong.
+                    var sug = System.Runtime.InteropServices.Marshal.PtrToStructure<RECT>(lParam);
+                    SetWindowPos(hwnd, IntPtr.Zero, sug.left, sug.top,
+                                 sug.right - sug.left, sug.bottom - sug.top,
+                                 SWP_NOZORDER | SWP_NOACTIVATE);
+                    // No metrics to invalidate: cell size is measured in DIPs from the text format, so
+                    // it does not move with the scale — and the SetWindowPos above raises WM_SIZE,
+                    // which resizes the surface and regrids every session. This message's job is only
+                    // to change the scale and accept the rect.
+                    InvalidateRect(hwnd, IntPtr.Zero, false);
+                    return IntPtr.Zero;
+                }
+
+            case WM_SIZE:
+                if (_rt is not null)
+                {
+                    int w = LoWord(lParam), h = HiWord(lParam);
+                    if (w > 0 && h > 0)
+                    {
+                        _rt.Resize(new SizeI(w, h));
+                        // During an interactive drag, only the visible session tracks each tick (cheap +
+                        // responsive). A non-drag size change (maximize / snap / restore) is a settled size,
+                        // so sync EVERY session now — that keeps inactive PTYs window-sized and means a later
+                        // session-switch never resizes (no alt-screen clear, no blank pane on slow machines).
+                        if (_sizing) { if (_active is not null) RegridSession(_active); }
+                        else RegridAllSessions();
+                        if (_cover is not null) RegridCover();
+                        InvalidateRect(hwnd, IntPtr.Zero, false);
+                    }
+                }
+                // Persist on maximize/restore transitions (button clicks, not per-pixel drag).
+                { bool z = IsZoomed(hwnd); if (z != _wasMaximized) { _wasMaximized = z; SaveState(); } }
+                return IntPtr.Zero;
+
+            case WM_ENTERSIZEMOVE:
+                _sizing = true;
+                return IntPtr.Zero;
+
+            case WM_EXITSIZEMOVE:
+                _sizing = false;
+                RegridAllSessions(); // drag settled: bring every inactive session up to the final size
+                SaveState();         // persist geometry after a manual move/resize drag
+                return IntPtr.Zero;
+
+            case WM_KEYDOWN:
+            case WM_SYSKEYDOWN:
+                // Menu bar (MenuBar.cs): a lone Alt tap focuses it, so Alt going down arms it and any
+                // other key disarms it; Alt+letter with the context bit set is a mnemonic outside the
+                // terminal (MenuBarMnemonic) — read here, off lParam, so a posted key counts as much as
+                // a typed one.
+                _menuAteChar = false;   // a fresh key-down: whatever the last one ate is history
+                if ((int)wParam == VK_MENU)
+                {
+                    // Armed only while neither the bar nor a menu has the keyboard: with the bar focused
+                    // the key-down itself leaves it (MenuBarKey) and with a menu open it closes it
+                    // (MenuKeyDown), and arming here too made the same tap's key-up focus the bar again.
+                    if (msg == WM_SYSKEYDOWN && ((long)lParam & 0x40000000) == 0)
+                        _altArmed = MenuBarUsable && _menuBarFocus < 0 && _menuLevels.Count == 0;
+                }
+                else
+                {
+                    _altArmed = false;
+                    if (msg == WM_SYSKEYDOWN && ((long)lParam & 0x20000000) != 0 && MenuBarMnemonic((int)wParam)) { _menuAteChar = true; return IntPtr.Zero; }
+                }
+                if (_dragging && (int)wParam == VK_ESCAPE)
+                {
+                    _dragging = false; _sbPress = false; _pressItem = null; _dragItem = null;
+                    ReleaseCapture(); RequestRedraw(); return IntPtr.Zero;
+                }
+                // The message's own Alt state (the WM_SYSKEYDOWN context bit) backs GetKeyState for the
+                // chord: a key that was queued or posted arrives after Alt is up, and the bit is what
+                // was true when it was pressed.
+                _altContext = msg == WM_SYSKEYDOWN && ((long)lParam & 0x20000000) != 0;
+                // TranslateMessage queued this key's WM_CHAR BEFORE the key-down ran, so a check of the
+                // menu state when the char arrives is a check of what the key-down left behind: a Space
+                // that ran a row would reach the pane or a palette. And a row that runs a modal loop
+                // (About, a close confirmation) pumps that char while the menu is already closed — from
+                // INSIDE OnKeyDown. So the decision is taken before the dispatch: a char-making key the
+                // menu or the bar owns eats its own char, once; withdrawn if the key-down was not consumed.
+                _menuAteChar = (_menuLevels.Count > 0 || _menuBarFocus >= 0) && KeyMakesChar((int)wParam);
+                try
+                {
+                    if (OnKeyDown((int)wParam)) return IntPtr.Zero;
+                    _menuAteChar = false;
+                }
+                finally { _altContext = false; }
+                break;
+
+            case WM_KEYUP:
+            case WM_SYSKEYUP:
+                // win32-input-mode: emit the paired key-UP (Alt releases arrive as WM_SYSKEYUP).
+                Win32KeyUp((int)wParam);
+                if (msg == WM_SYSKEYUP && (int)wParam == VK_MENU && _altArmed)
+                {
+                    // A lone Alt tap: the bar takes the keyboard focus (or gives it back), and the tap
+                    // never reaches DefWindowProc's SC_KEYMENU.
+                    _altArmed = false;
+                    if (MenuBarUsable) FocusMenuBar(0);
+                    return IntPtr.Zero;
+                }
+                if (msg == WM_SYSKEYUP) break;
+                // Committing the MRU walk happens when Ctrl is finally released (any key-up where Ctrl
+                // is no longer held is exactly the Ctrl-up event; a Tab-up with Ctrl still down is ignored).
+                if (_mruWalking && !KeyDown(VK_CONTROL)) { MruCommit(); return IntPtr.Zero; }
+                if (!KeyDown(VK_CONTROL)) ClearLinkHover();   // Ctrl released: drop the link underline/cursor
+                break;
+
+            case WM_SETCURSOR:
+                if (_linkUrl is not null && LoWord(lParam) == HTCLIENT)
+                { SetCursor(LoadCursorW(IntPtr.Zero, IDC_HAND)); return (IntPtr)1; }   // hand over a hovered link
+                // A resize cursor over (or while dragging) the split divider, shaped by the axis:
+                // ⇔ on a vertical split's column gap, ⇕ on a horizontal split's row gap (P4).
+                if (LoWord(lParam) == HTCLIENT && _cover is null && _active is { } sc && sc.Panes.Count > 1)
+                {
+                    bool overDivider = _divDragging;
+                    if (!overDivider)
+                    {
+                        GetCursorPos(out POINT cp); ScreenToClient(hwnd, ref cp);
+                        overDivider = DividerAt(ToDip(cp.x), ToDip(cp.y)) >= 0;
+                    }
+                    if (overDivider)
+                    {
+                        SetCursor(LoadCursorW(IntPtr.Zero, sc.Axis == SplitAxes.Horizontal ? IDC_SIZENS : IDC_SIZEWE));
+                        return (IntPtr)1;
+                    }
+                }
+                break;
+
+            case WM_CHAR:
+                {
+                    char c = (char)wParam;
+                    if (_kittyAteChar) { _kittyAteChar = false; return IntPtr.Zero; }   // OnKeyDown already CSI-u-encoded this key
+                    if (_menuAteChar || _menuLevels.Count > 0 || _menuBarFocus >= 0) { _menuAteChar = false; return IntPtr.Zero; }   // the menu's key-down made this char (MenuBar.cs)
+                    if (CloseExitedOverlayOnKey()) return IntPtr.Zero;   // the any-key close of an exited --wait overlay (cover, else the focused pane's — P5)
+                    if ((int)c == 13 && TryCloseExitHoldOnEnter()) return IntPtr.Zero;
+                    if (_setOpen)
+                    {
+                        if (_ddRow is not null && c >= 0x20 && c != 0x7f) { _ddQuery += c; FilterDropdown(); RequestRedraw(); }
+                        return IntPtr.Zero;
+                    }
+                    if (_palette != PaletteKind.None)
+                    {
+                        if (c >= 0x20 && c != 0x7f) { _palQuery += c; _palSel = 0; FilterPalette(); RequestRedraw(); }
+                        return IntPtr.Zero;
+                    }
+                    if (_searchActive)
+                    {
+                        if (c >= 0x20 && c != 0x7f) { _searchQuery += c; RecomputeSearch(); _searchCur = 0; ScrollToMatch(); RequestRedraw(); }
+                        return IntPtr.Zero;
+                    }
+                    // win32-input-mode encodes the char in the key-down sequence's Uc field, so
+                    // sending it again here would duplicate it for this pane. Checked HERE, below the
+                    // overlay handlers, not above them: while the action palette / settings dropdown /
+                    // search bar is up it owns the keyboard, and dropping its characters made all
+                    // three impossible to type into whenever the pane's program had ?9001 on — which
+                    // ConPTY enables, so any pane running Claude Code did it. The overlay opened,
+                    // arrows and Enter worked (those are handled in OnKeyDown, above this path), but
+                    // no text ever arrived.
+                    if (ActiveSurface()?.S.Emulator.Win32InputMode == true) return IntPtr.Zero;
+                    if (c >= 0x20 && c != 0x7f) Send(c.ToString());
+                    return IntPtr.Zero;
+                }
+
+            case WM_LBUTTONDOWN:
+                DismissHoverTip();
+                {
+                    int mx = DipX(lParam), my = DipY(lParam);   // device px -> DIP layout
+                    if (_chromeFocus) ExitChromeFocus(announce: false);   // a click leaves the F6 sidebar zone
+                    if (_helpOpen)
+                    {
+                        bool onClose = mx >= _helpCloseX0 && mx <= _helpCloseX1 && my >= _helpCloseY0 && my <= _helpCloseY1;
+                        if (onClose || mx < _helpCard.Left || mx > _helpCard.Right || my < _helpCard.Top || my > _helpCard.Bottom) CloseHelp();
+                        return IntPtr.Zero;
+                    }
+                    if (_setOpen) { SettingsClick(mx, my); return IntPtr.Zero; }
+                    if (_palette != PaletteKind.None) { PaletteClick(mx, my); return IntPtr.Zero; }
+                    _altArmed = false;
+                    if (_menuBarFocus >= 0) LeaveMenuBar();
+                    // A bar label opens its menu on the press, as a native menu does (while a menu is up
+                    // the popup holds the capture and routes this click itself).
+                    if (my < (int)TitleBarH && MenuBarUsable && MenuBarLabelAt(mx) is int menuLabel) { OpenMenuBar(menuLabel); return IntPtr.Zero; }
+                    if (_dashboardOpen) { DashboardClick(mx, my, doubleClick: false); return IntPtr.Zero; }
+                    // Notification banner: clicking it jumps to the raising session and dismisses.
+                    if (_toastText is not null && _toastTarget is not null &&
+                        mx >= _toastRect.Left && mx <= _toastRect.Right && my >= _toastRect.Top && my <= _toastRect.Bottom)
+                    {
+                        var t = _toastTarget;
+                        _toastText = null; _toastTarget = null; KillTimer(hwnd, (IntPtr)2);
+                        SetActive(t);
+                        return IntPtr.Zero;
+                    }
+                    // Quick terminal is a floating panel: its corner ✕ hides it, and a left-click anywhere
+                    // in the "main window area" outside the panel also dismisses it (like a tool window).
+                    if (_coverKind == 2)
+                    {
+                        var (qx, qy, qw, qh) = CoverRect();
+                        var (bx, by, bw, bh) = CoverCloseRect(qx + qw, qy);
+                        if (mx >= bx && mx < bx + bw && my >= by && my < by + bh) { HideCover(); return IntPtr.Zero; }
+                        if (mx < qx || mx >= qx + qw || my < qy || my >= qy + qh) { HideCover(); return IntPtr.Zero; }
+                    }
+                    if (my < (int)TitleBarH)
+                    {
+                        string? id = ChromeHit(_titleButtons, mx);
+                        if (id is not null) { _pressBtn = id; _hotBtn = id; _hotPaint = id; SetCapture(hwnd); RequestRedraw(); }
+                        return IntPtr.Zero;
+                    }
+                    if (mx < (int)_sidebarW)
+                    {
+                        if (my >= ClientH() - (int)FooterH)
+                        {
+                            string? id = ChromeHit(_footerButtons, mx);
+                            if (id is not null) { _pressBtn = id; _hotBtn = id; _hotPaint = id; SetCapture(hwnd); RequestRedraw(); }
+                            return IntPtr.Zero;
+                        }
+                        // List row: begin click-vs-drag (act on release). Skip while renaming.
+                        if (_editHwnd == IntPtr.Zero)
+                        {
+                            _sbPress = true; _pressItem = RowAt(my); _pressX = mx; _pressY = my;
+                            _dragging = false; _dragItem = null;
+                            SetCapture(hwnd);
+                        }
+                        return IntPtr.Zero;
+                    }
+                    int di = _cover is null ? DividerAt(mx, my) : -1;
+                    if (di >= 0) { _divDragging = true; _divLeft = di; SetCapture(hwnd); return IntPtr.Zero; }
+                    if (_cover is null) FocusPaneAt(mx, my); // covers capture the whole content region
+                    // Ctrl+click on a hovered link opens it (never starts a selection or reaches the app).
+                    if (KeyDown(VK_CONTROL) && _linkUrl is { } lurl) { OpenLink(lurl); return IntPtr.Zero; }
+                    bool shiftDn = KeyDown(VK_SHIFT);
+                    var em0 = _session?.Emulator;
+                    if (em0 is not null && em0.MouseReporting && !shiftDn) { SendMousePx(0, lParam, true); SetCapture(hwnd); return IntPtr.Zero; }
+                    // Text selection (app not grabbing the mouse, or Shift held to override).
+                    if (PaneAt(mx, my) is { } h0)
+                    {
+                        var (line, col) = CellAtPx(h0.pane, h0.ox, h0.oy, h0.cw, h0.ch, mx, my);
+                        if (Environment.TickCount - _lastClickMs < 400 && _clickCount >= 2)  // triple-click -> line
+                        { SelectLine(h0.pane, line); _clickCount = 3; _selMoved = true; }
+                        else { BeginSelect(h0.pane, line, col, shiftDn); _clickCount = 1; }
+                        h0.pane.BlockSel = KeyDown(VK_MENU) && _clickCount == 1;   // Alt+drag = rectangular
+                        _lastClickMs = Environment.TickCount;
+                        _selPane = h0.pane; _selAutoDir = 0; _selMouseX = mx;
+                        _selecting = true; SetCapture(hwnd); RequestRedraw();
+                    }
+                    return IntPtr.Zero;
+                }
+            case WM_LBUTTONUP:
+                if (_setOpen) { SettingsMouseUp(); return IntPtr.Zero; }
+                if (_pressBtn is not null)
+                {
+                    ReleaseCapture();
+                    int ux = DipX(lParam), uy = DipY(lParam);
+                    string? over = uy < (int)TitleBarH ? ChromeHit(_titleButtons, ux)
+                        : (ux < (int)_sidebarW && uy >= ClientH() - (int)FooterH ? ChromeHit(_footerButtons, ux) : null);
+                    string fired = _pressBtn; _pressBtn = null; RequestRedraw();
+                    if (over == fired) ChromeAction(fired);
+                    return IntPtr.Zero;
+                }
+                if (_divDragging) { _divDragging = false; ReleaseCapture(); RequestRedraw(); return IntPtr.Zero; }
+                if (_sbPress)
+                {
+                    ReleaseCapture();
+                    int ux = DipX(lParam), uy = DipY(lParam);
+                    if (_dragging && _dragItem is not null) DropDrag(_dragItem, uy);
+                    else SidebarClick(ux, uy);   // was a click, not a drag
+                    _sbPress = false; _pressItem = null; _dragItem = null; _dragging = false;
+                    RequestRedraw();
+                    return IntPtr.Zero;
+                }
+                if (_selecting)
+                {
+                    _selecting = false; ReleaseCapture(); StopSelAutoscroll();
+                    var sp = _selPane; _selPane = null;
+                    if (!_selMoved) { ActiveSurface()?.ClearSel(); RequestRedraw(); } // plain click clears
+                    else if (sp is not null) FinalizeSelection(sp);                   // copy-on-select
+                    return IntPtr.Zero;
+                }
+                if (InContent(lParam)) { SendMousePx(0, lParam, false); }
+                ReleaseCapture(); return IntPtr.Zero;
+
+            case WM_LBUTTONDBLCLK:
+                {
+                    int mx = DipX(lParam), my = DipY(lParam);   // device px -> DIP layout
+                    if (_dashboardOpen) { DashboardClick(mx, my, doubleClick: true); return IntPtr.Zero; }
+                    if (mx < (int)_sidebarW && my >= (int)TitleBarH && my < ClientH() - (int)FooterH)
+                    {
+                        var item = RowAt(my);
+                        if (item is not null) { StartRename(item); return IntPtr.Zero; }
+                    }
+                    else if (PaneAt(mx, my) is { } h0)  // double-click selects the word
+                    {
+                        var (line, col) = CellAtPx(h0.pane, h0.ox, h0.oy, h0.cw, h0.ch, mx, my);
+                        SelectWord(h0.pane, line, col);
+                        _clickCount = 2; _lastClickMs = Environment.TickCount; _selMoved = true; _selecting = false;
+                        FinalizeSelection(h0.pane);
+                        RequestRedraw();
+                    }
+                    return IntPtr.Zero;
+                }
+            case WM_MBUTTONDOWN: if (InContent(lParam)) SendMousePx(1, lParam, true); return IntPtr.Zero;
+            case WM_MBUTTONUP: if (InContent(lParam)) SendMousePx(1, lParam, false); return IntPtr.Zero;
+            case WM_RBUTTONDOWN:
+                if (InContent(lParam))
+                {
+                    var em2 = _session?.Emulator;
+                    // Paste-on-right-click (when enabled) wins over app mouse reporting: TUIs like
+                    // Claude Code keep mouse mode on the whole time, which used to make the setting
+                    // dead exactly where pasting matters most. Apps that need the right button can
+                    // still get it by turning the setting off.
+                    if (_config.RightClickPaste && (PaneAt(DipX(lParam), DipY(lParam))?.pane ?? ActiveSurface()) is { } pp)
+                        PasteInto(pp);
+                    else if (em2 is not null && em2.MouseReporting) { SendMousePx(2, lParam, true); _rbtnForwarded = true; }
+                    return IntPtr.Zero;
+                }
+                break; // sidebar/chrome: let DefWindowProc raise WM_CONTEXTMENU so the row menu shows
+            case WM_RBUTTONUP:
+                // Only send the release if we forwarded the press — a paste must not leak an
+                // orphan button-2 release into the app.
+                if (InContent(lParam)) { if (_rbtnForwarded) { _rbtnForwarded = false; SendMousePx(2, lParam, false); } return IntPtr.Zero; }
+                break; // sidebar/chrome: fall through to DefWindowProc -> WM_CONTEXTMENU
+
+            case WM_MOUSEMOVE:
+                {
+                    if (_setOpen) { if (_setDragRow is not null) SettingsDrag(DipX(lParam)); return IntPtr.Zero; }
+                    if (!_mouseTracking)
+                    {
+                        var tme = new TRACKMOUSEEVENT { cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<TRACKMOUSEEVENT>(), dwFlags = TME_LEAVE, hwndTrack = hwnd, dwHoverTime = 0 };
+                        TrackMouseEvent(ref tme); _mouseTracking = true;
+                    }
+                    if (!_divDragging && !_sbPress && !_selecting) UpdateChromeHover(DipX(lParam), DipY(lParam));
+                    if (!_divDragging && !_sbPress && !_selecting)
+                    {
+                        if (KeyDown(VK_CONTROL)) UpdateLinkHover(DipX(lParam), DipY(lParam));   // Ctrl+hover: link detection
+                        else ClearLinkHover();
+                    }
+                    if (_divDragging && ((long)wParam & MK_LBUTTON) != 0) { DragDivider(DipX(lParam), DipY(lParam)); return IntPtr.Zero; }
+                    if (_sbPress && ((long)wParam & MK_LBUTTON) != 0)
+                    {
+                        int mx = DipX(lParam), my = DipY(lParam);   // device px -> DIP layout
+                        if (!_dragging && _pressItem is not null &&
+                            Math.Abs(mx - _pressX) + Math.Abs(my - _pressY) > DragThreshold)
+                        { _dragging = true; _dragItem = _pressItem; }
+                        if (_dragging) { _dragX = mx; _dragY = my; RequestRedraw(); }
+                        return IntPtr.Zero;
+                    }
+                    if (_selecting && ((long)wParam & MK_LBUTTON) != 0)
+                    {
+                        int mmx = DipX(lParam), mmy = DipY(lParam);
+                        _selMouseX = mmx;
+                        if (_selPane is { } sp && PaneBox(sp) is { } bx)
+                        {
+                            float top = bx.oy, bottom = bx.oy + bx.rows * bx.ch;
+                            _selAutoDir = mmy < top ? -1 : (mmy >= bottom ? 1 : 0);
+                            // Track focus at the vertically-clamped point so horizontal moves register out of bounds.
+                            int cy = (int)Math.Clamp(mmy, top, bottom - 1);
+                            var (line, col) = CellAtPx(sp, bx.ox, bx.oy, bx.cw, bx.ch, mmx, cy);
+                            UpdateSelect(sp, line, col);
+                            if (_selAutoDir != 0) SetTimer(hwnd, (IntPtr)SelAutoTimer, 50, IntPtr.Zero);
+                            else StopSelAutoscroll();
+                            RequestRedraw();
+                        }
+                        return IntPtr.Zero;
+                    }
+                    var em = _session?.Emulator;
+                    if (em is not null && em.MouseReportsMotion && InContent(lParam))
+                        SendMousePx(32 + (((long)wParam & MK_LBUTTON) != 0 ? 0 : 3), lParam, true);
+                    return IntPtr.Zero;
+                }
+
+            case WM_MOUSEWHEEL:
+                {
+                    if (_helpOpen) { HelpKey(HiWord(wParam) > 0 ? VK_UP : VK_DOWN); return IntPtr.Zero; }
+                    if (_setOpen) { SettingsWheel(HiWord(wParam) > 0 ? 1 : -1); return IntPtr.Zero; }
+                    var pt = new POINT { x = LoWord(lParam), y = HiWord(lParam) }; // wheel gives screen coords
+                    ScreenToClient(_hwnd, ref pt);
+                    int deviceX = pt.x, deviceY = pt.y;
+                    pt.x = ToDip(pt.x); pt.y = ToDip(pt.y);   // ...and they are compared against DIP layout
+                    // Ctrl+wheel: font zoom (Windows-wide convention), on the active surface.
+                    if (KeyDown(VK_CONTROL) && pt.x >= (int)_sidebarW && pt.y >= (int)TitleBarH)
+                    {
+                        ChangeFontSize(HiWord(wParam) > 0 ? 1 : -1);
+                        return IntPtr.Zero;
+                    }
+                    // Decide reporting versus history from the hit-tested surface, not keyboard focus.
+                    if (PaneAt(pt.x, pt.y) is { } under)
+                    {
+                        var p = under.pane;
+                        if (p.S.Emulator.MouseReporting)
+                        {
+                            SendMouseTo(p, (under.ox, under.oy, under.cw, under.ch),
+                                HiWord(wParam) > 0 ? 64 : 65, pt.x, pt.y, deviceX, deviceY, true);
+                            return IntPtr.Zero;
+                        }
+                        // The alt screen shows no history: an offset accumulated here would
+                        // never be rendered, and silently move where clicks land.
+                        if (p.S.Emulator.IsAltScreen) return IntPtr.Zero;
+                        int histN = p.S.Emulator.HistoryCount;
+                        int dir = HiWord(wParam) > 0 ? 1 : -1; // wheel up scrolls back into history
+                        int no = Math.Clamp(p.ScrollOffset + dir * Math.Clamp(_config.ScrollSpeed, 1, 10), 0, histN);
+                        if (no != p.ScrollOffset) { p.ScrollOffset = no; RequestRedraw(); }
+                    }
+                    return IntPtr.Zero;
+                }
+
+            case WM_SETTINGCHANGE:
+                // The system light/dark switch broadcasts this with lParam = "ImmersiveColorSet".
+                if (lParam != IntPtr.Zero &&
+                    System.Runtime.InteropServices.Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
+                    ApplySystemTheme();
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+            case WM_ACTIVATE:
+                bool wasActive = _windowActive;
+                _windowActive = LoWord(wParam) != 0;   // WA_ACTIVE/WA_CLICKACTIVE vs WA_INACTIVE (drives unfocused dim)
+                if (!_windowActive) { _altArmed = false; LeaveMenuBar(); }   // an Alt+Tab away is not a lone Alt tap
+                // Focus reporting (DECSET ?1004): on a real focus transition, tell the active pane's
+                // app the terminal gained (ESC[I) or lost (ESC[O) focus, so it can pause/resume.
+                if (_windowActive != wasActive && _session is { } fs && fs.Emulator.FocusReporting)
+                    SessionInput.TryWrite(fs, _windowActive ? "\x1b[I"u8 : "\x1b[O"u8);
+                if (_config.UnfocusedDim > 0) RequestRedraw();
+                if (_isQuickWindow && !_windowActive && _quickVisible && !_quickPinned
+                    && (lParam == IntPtr.Zero || GetAncestor(lParam, 3 /* GA_ROOTOWNER */) != _hwnd)) DismissQuick(blur: true);
+                if (!_isQuickWindow && _windowActive && _frontmostId != Id) // this library window is frontmost
+                {
+                    Frontmost = this; _frontmostId = Id; SaveIndex();
+                }
+                // Refocusing the app clears the badge of the session you're now looking at (agterm #164).
+                if (_windowActive && _active is not null && _cover is null && UnreadOf(_active) > 0)
+                { ClearUnread(_active); RequestRedraw(); }
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+            case WM_DESTROY:
+                _uia.Dispose();
+                CloseWindowPicker();
+                _uiGone.Cancel();                 // release any pipe thread waiting in InvokeOnUiQueued
+                RemoveTrayIcon();                 // drop the shell tray balloon icon
+                bool quitting;
+                lock (_windowIndex) quitting = _updateQuitting || _byId.Count <= 1;
+                // Persist this window's tree before tearing down its sessions — written NOW only when
+                // the process is about to go; a window closing beside others enqueues, because a
+                // synchronous write here would stall the UI thread every window shares (#294).
+                SaveState(captureCommands: true, sync: quitting);
+                // App-quit (last window, or an update-quit closing all of them) DETACHES panes —
+                // server-hosted sessions keep running and the next start adopts them (#105 2c).
+                // An explicit window close (others remain) still disposes = kills, like a pane
+                // close. Scratch/overlay always dispose; the app-level quick shell survives until
+                // the LAST library window closes, when DestroyQuickHost disposes it too.
+                foreach (var s in AllSessions())
+                {
+                    foreach (var p in s.Panes)
+                    {
+                        try { p.Overlay.Term?.S.Dispose(); } catch { }   // a pane overlay (P5) is never restored either
+                        try { if (quitting) p.S.Detach(); else p.S.Dispose(); } catch { }
+                    }
+                    try { s.Scratch?.S.Dispose(); } catch { }
+                    try { s.Overlay.Term?.S.Dispose(); } catch { }
+                }
+                try { _quick?.S.Dispose(); } catch { }
+                bool lastWindow;
+                lock (_windowIndex)
+                {
+                    _byId.Remove(Id);
+                    // "Last window" must count LIVE windows (_byId), not index metas: an update-quit
+                    // keeps metas IsOpen=true (so they reopen after relaunch), which would make the
+                    // meta count never reach zero and leave a windowless process running forever.
+                    lastWindow = _byId.Count == 0;
+                    var meta = _windowIndex.FirstOrDefault(m => m.Id == Id);
+                    // Explicit close (others remain) -> mark closed so it won't auto-reopen. App quit
+                    // (this was the last open window) -> keep IsOpen=true so it reopens next launch.
+                    // Update-quit closes every window in sequence — those must ALL reopen after the
+                    // relaunch, so it never marks any of them closed.
+                    if (meta is not null && !lastWindow && !_updateQuitting) meta.IsOpen = false;
+                    if (ReferenceEquals(Frontmost, this))
+                    {
+                        var nf = _byId.Values.FirstOrDefault();
+                        if (nf is not null) { Frontmost = nf; _frontmostId = nf.Id; }
+                    }
+                }
+                SaveIndex(sync: lastWindow);   // the last window out needs the index on disk before the process goes
+                if (lastWindow)
+                {
+                    // This window's own tree and the index were written above; a window that closed
+                    // while others were open only QUEUED its close-time tree, and this drain is that
+                    // snapshot's last chance before the process goes. Bounded: on the #294 machine a
+                    // worker held in the filter past this loses what it was holding.
+                    _stateWriter.Shutdown(TimeSpan.FromSeconds(15));
+                    DestroyQuickHost(); PostQuitMessage(0);
+                }
+                return IntPtr.Zero;
+        }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+    }
+}

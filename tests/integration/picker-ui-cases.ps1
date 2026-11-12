@@ -14,7 +14,7 @@ public static class PickerProbe {
     public static string Text(IntPtr h) { var text=new System.Text.StringBuilder(4097);SendMessageW(h,13,(IntPtr)text.Capacity,text);return text.ToString(); }
     public static IntPtr Find(IntPtr owner) {
         IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{var b=new System.Text.StringBuilder(100);GetClassNameW(h,b,100);
-            if(GetWindow(h,4)==owner && b.ToString()=="Agwinterm.NativePicker"){found=h;return false;}return true;},IntPtr.Zero);return found;
+            if(GetWindow(h,4)==owner && b.ToString()=="Wagterm.NativePicker"){found=h;return false;}return true;},IntPtr.Zero);return found;
     }
 }
 '@
@@ -106,7 +106,7 @@ Pick-Query $complexQuery;Pick-Key 0x0d
 Check 'over-complex edited query disables choice but stays pending' ((Pick-Count)-eq 0 -and (Pick-Result).result-eq 'pending')
 Pick-Query 'a';Check 'valid query recovers the pending picker' ((Pick-Count)-eq 100)
 Pick-Key 0x0d;Check 'recovered query can choose original item' ((Pick-Result).result-eq 'picked' -and (Pick-Result).index-eq 0)
-$ctl=Join-Path $root 'src/Agwinterm.Ctl/bin/Release/net10.0-windows/agwintermctl.exe'
+$ctl=Join-Path $root 'src/Wagterm.Ctl/bin/Release/net10.0-windows/wagtermctl.exe'
 $opened='Alpha'|& $ctl pick --no-block --pipe $pipe|ConvertFrom-Json
 Check 'real CLI stdin no-block returns id payload' ($LASTEXITCODE-eq 0 -and $opened.id)
 $reply=& $ctl pick result $opened.id --pipe $pipe|ConvertFrom-Json

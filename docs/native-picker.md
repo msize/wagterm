@@ -1,15 +1,15 @@
 # Native picker
 
-P16 adds a native, window-owned picker to agwinterm. Item data is never executed.
+P16 adds a native, window-owned picker to wagterm. Item data is never executed.
 P17 expands shared conformance; the agliteterm companion has process-local retention
 and explicit pipe routing (see [lite parity](lite-parity.md#p17-wave-3-mirror)).
 
 ```powershell
-'Alpha','Beta' | agwintermctl pick --prompt 'Choose a project'
+'Alpha','Beta' | wagtermctl pick --prompt 'Choose a project'
 '[{"id":"repo-a","label":"Alpha","subtitle":"Read-only checkout"}]' |
-    agwintermctl pick --query al --no-block
-agwintermctl pick result PICKER-ID
-agwintermctl pick cancel PICKER-ID
+    wagtermctl pick --query al --no-block
+wagtermctl pick result PICKER-ID
+wagtermctl pick cancel PICKER-ID
 ```
 
 `pick [open]` reads UTF-8 JSON items or plain lines from stdin until EOF. Auto format
@@ -21,7 +21,7 @@ refuse, including duplicate plain lines. JSON IDs are exact/case-sensitive; empt
 duplicate labels are legal. Each item needs string `id` and nonempty `label`; `subtitle`
 is optional. `--prompt`, `--query`, `--allow-custom`, `--window`, `--follow`, `--no-block`
 are open options. `--pipe`/`--socket` choose transport. There is no session target or
-implicit `$AGWINTERM_SESSION_ID` selection for a picker.
+implicit `$WAGTERM_SESSION_ID` selection for a picker.
 
 Open displays without stealing another application's foreground. `--follow` requests
 normal OS activation (not guaranteed by Windows). Arrows clamp, typing resets selection,

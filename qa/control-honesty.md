@@ -9,19 +9,19 @@ session in whatever workspace the user had last clicked.
 **The rule they all serve:** a reply describes what actually happened, or the call is refused and
 nothing happens. So every case here checks **two** things: the reply, and the world — the pane's text,
 `tree`, the pane's measured width — because a refusal that still did the thing, or a success that did
-not, passes a reply-only check. The unit tests in `tests/Agwinterm.Pty.Tests/` pin the shapes; this
+not, passes a reply-only check. The unit tests in `tests/Wagterm.Pty.Tests/` pin the shapes; this
 file checks the shapes are about the real thing.
 
 Setup for every case: sandbox instance per `qa/product.md`. No config overrides. Each case reads the
 sandbox's own session id first — a verb with no `--target` resolves the *caller's* session, and
 `Send-Ctl` unsets the caller's variables precisely so that cannot happen silently. Two cases below
 have to call the CLI **directly** (one to pipe stdin, one to *be* a caller): call `Send-Ctl` once
-before them, so the variables are already gone, and never leave `AGWINTERM_SESSION_ID` set afterwards.
+before them, so the variables are already gone, and never leave `WAGTERM_SESSION_ID` set afterwards.
 
 ```powershell
 . tests\ui\lib.ps1
-$exe = Resolve-Binary $null 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
+$exe = Resolve-Binary $null 'wagterm.exe' 'Wagterm.Win32'
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
 $s   = Start-Sandbox -Exe $exe -Ctl $ctl -Pipe 'qah'
 
 function Tree($s)       { (ConvertFrom-Json (Send-Ctl $s @('tree'))).result }
@@ -33,9 +33,9 @@ function Reply($s,$a)   { ConvertFrom-Json (Send-Ctl $s $a) }
 function Metrics($s,$t) { (Reply $s @('session','metrics','--target',$t)).result }
 # Run the CLI AS a pane: the one case that needs the caller identity set, scoped to the call.
 function As($s,$pane,$a) {
-    $env:AGWINTERM_SESSION_ID = $pane
+    $env:WAGTERM_SESSION_ID = $pane
     try { (& $s.Ctl @a --pipe $s.Pipe --json 2>&1) -join '' }
-    finally { Remove-Item env:AGWINTERM_SESSION_ID -ErrorAction SilentlyContinue }
+    finally { Remove-Item env:WAGTERM_SESSION_ID -ErrorAction SilentlyContinue }
 }
 ```
 
@@ -61,7 +61,7 @@ and both losses were silent: `ok:true`, and the shell received a different line.
    The pipe adds one trailing newline; `--stdin` drops exactly one, so this is a **draft**, not a
    submitted command. Wait ~1s.
 2. Read the pane with `Get-PaneText $s (Sid $s)` and split it into lines.
-3. Press Escape through the real key path — `[AgwUi]::Key($s.Hwnd, 27, 1)` — and confirm the draft
+3. Press Escape through the real key path — `[WagUi]::Key($s.Hwnd, 27, 1)` — and confirm the draft
    is gone before step 4.
 4. Send the *same* text as argv, the only way it could be sent before:
 
@@ -368,7 +368,7 @@ one that matters. P2 (0.17.11).
 - 4–5: `(WsOf $s $b2).name -eq 'B'` again — the select in step 3 did not steer it. This is the
   assertion the case exists for;
 - 6: `(WsOf $s $p).id -eq $A.id` — with no caller it is still the active one, so the difference
-  between 6 and 4 is the caller and nothing else. Confirm `$env:AGWINTERM_SESSION_ID` is unset after
+  between 6 and 4 is the caller and nothing else. Confirm `$env:WAGTERM_SESSION_ID` is unset after
   the case.
 
 **Fails when:** the CLI stops sending `caller` (or sends it as `target`, which would change what an

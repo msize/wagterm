@@ -23,15 +23,15 @@ Win, F12, unmodified and Shift-only chords are refused. Conflicts refuse without
 changing the current binding or saved value; startup conflicts warn. Empty disables
 and releases the binding. Holding the key does not repeatedly toggle the panel.
 
-`agwintermctl quick on|off|toggle` controls visibility. API shows stay pinned and
+`wagtermctl quick on|off|toggle` controls visibility. API shows stay pinned and
 do **not** take keyboard focus. A human summon requests focus through normal Windows
 policy; the app does not override the OS's foreground restrictions.
 
 ```powershell
-agwintermctl quick on
-agwintermctl session type "echo hello`r" --window quick --target active
-agwintermctl session text --window quick --target active
-agwintermctl quick off
+wagtermctl quick on
+wagtermctl session type "echo hello`r" --window quick --target active
+wagtermctl session text --window quick --target active
+wagtermctl quick off
 ```
 
 `--window quick` addresses the auxiliary host, not a library window. Its shell

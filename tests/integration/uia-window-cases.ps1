@@ -13,7 +13,7 @@ public static class NavUiaWindows {
  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint p);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h,StringBuilder b,int n);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassNameW(IntPtr h,StringBuilder b,int n);
- public static IntPtr[] Owned(uint pid,bool quick=false){var found=new List<IntPtr>();EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid){var cls=new StringBuilder(256);GetClassNameW(h,cls,256);if(cls.ToString()!="AgwintermWin32")return true;var text=new StringBuilder(256);GetWindowTextW(h,text,256);if((text.ToString()=="agwinterm quick terminal")==quick)found.Add(h);}return true;},IntPtr.Zero);return found.ToArray();}
+ public static IntPtr[] Owned(uint pid,bool quick=false){var found=new List<IntPtr>();EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid){var cls=new StringBuilder(256);GetClassNameW(h,cls,256);if(cls.ToString()!="WagtermWin32")return true;var text=new StringBuilder(256);GetWindowTextW(h,text,256);if((text.ToString()=="WagTerm quick terminal")==quick)found.Add(h);}return true;},IntPtr.Zero);return found.ToArray();}
 }
 '@
 function UiaDoc([IntPtr]$handle){

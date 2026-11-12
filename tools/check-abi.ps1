@@ -1,8 +1,8 @@
-# The agwinterm-core C ABI is declared in THREE places, one per consumer, and nothing has ever
+# The wagterm-core C ABI is declared in THREE places, one per consumer, and nothing has ever
 # checked that they agree:
 #
-#   native/agwinterm-core/src/lib.rs      pub const ABI_VERSION      (the source of truth)
-#   src/Agwinterm.Core/RustEmulatorCore.cs      public const uint RequiredAbi
+#   native/wagterm-core/src/lib.rs      pub const ABI_VERSION      (the source of truth)
+#   src/Wagterm.Core/RustEmulatorCore.cs      public const uint RequiredAbi
 #
 # A third consumer, agliteterm, declares kRequiredAbi in its OWN repository. It is checked there,
 # against the manifest this script emits — which is exactly the case that motivated all of this.
@@ -31,8 +31,8 @@ function Read-Abi([string]$Path, [string]$Pattern, [string]$Label) {
 }
 
 $decls = @(
-    Read-Abi 'native/agwinterm-core/src/lib.rs'      'pub const ABI_VERSION:\s*u32\s*=\s*(\d+)'        'rust core (source of truth)'
-    Read-Abi 'src/Agwinterm.Core/RustEmulatorCore.cs' 'public const uint RequiredAbi\s*=\s*(\d+)'       'C# RustEmulatorCore'
+    Read-Abi 'native/wagterm-core/src/lib.rs'      'pub const ABI_VERSION:\s*u32\s*=\s*(\d+)'        'rust core (source of truth)'
+    Read-Abi 'src/Wagterm.Core/RustEmulatorCore.cs' 'public const uint RequiredAbi\s*=\s*(\d+)'       'C# RustEmulatorCore'
 )
 # The third consumer, agliteterm, now lives in its own repository and is NOT checked here — it
 # CANNOT be, and that is the point of publishing the ABI manifest: it pins a released core, reads
@@ -43,7 +43,7 @@ $decls | ForEach-Object { "  {0,-28} v{1,-3} {2}" -f $_.Label, $_.Abi, $_.Path }
 
 $distinct = @($decls.Abi | Sort-Object -Unique)
 if ($distinct.Count -ne 1) {
-    throw ("agwinterm-core ABI DRIFT: consumers disagree ({0}). " -f ($distinct -join ' vs ')) +
+    throw ("wagterm-core ABI DRIFT: consumers disagree ({0}). " -f ($distinct -join ' vs ')) +
           "Bump every declaration in the same commit — a mismatched pair is a hard refusal at load, " +
           "and across repositories it can ship: agliteterm builds against whatever abiVersion the " +
           "manifest here claims."
@@ -53,11 +53,11 @@ $abi = $distinct[0]
 "ABI v$abi — all $($decls.Count) declarations agree"
 
 if ($ManifestOut) {
-    # Ships beside agwinterm_core.dll / agwinterm-ptyhost.exe so a consumer in another repository
+    # Ships beside wagterm_core.dll / wagterm-ptyhost.exe so a consumer in another repository
     # can check the pairing BEFORE loading the dll, instead of finding out via fatal().
     $manifest = [ordered]@{
         abiVersion = $abi
-        artifacts  = @('agwinterm_core.dll', 'agwinterm-ptyhost.exe')
+        artifacts  = @('wagterm_core.dll', 'wagterm-ptyhost.exe')
         note       = 'Consumers must require exactly this abiVersion; the C ABI carries no compatibility guarantee across versions.'
     }
     $dir = Split-Path -Parent $ManifestOut

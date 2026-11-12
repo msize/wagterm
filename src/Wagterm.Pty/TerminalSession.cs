@@ -1,0 +1,492 @@
+using Wagterm.Core;
+using Microsoft.Win32.SafeHandles;
+using Porta.Pty;
+
+namespace Wagterm.Pty;
+
+/// <summary>
+/// Wires a ConPTY-backed child process to a headless <see cref="TerminalEmulator"/>:
+/// spawns the process, pumps its output into the emulator on a reader loop, and
+/// exposes a thread-safe view of the resulting grid.
+/// </summary>
+public sealed class TerminalSession : ISession
+{
+    private readonly object _sync = new();
+    private IPtyConnection? _connection;
+    private long _pumpBytes;   // bytes the pump has fed so far; the exit watchers' settle window reads it
+    private int _pumpInFlight; // 1 while a chunk is read but not yet fed + tapped (the feed can block on _sync)
+
+    public ITerminalCore Emulator { get; }
+    public int Cols { get; private set; }
+    public int Rows { get; private set; }
+
+    /// <summary>PID of the spawned shell process (null before start), for foreground-command capture.</summary>
+    public int? ChildProcessId => _connection?.Pid;
+
+    /// <summary>Raised (on a background thread) after each chunk of output is fed to the emulator.</summary>
+    public event Action? OutputReceived;
+
+    /// <summary>Raw-output tap (pty-host): each ConPTY chunk, verbatim, after it fed the emulator.
+    /// The copy is made only while subscribed. Raised on the pump thread — a slow handler stalls
+    /// THIS session's feed, so consumers must be quick or buffer themselves.</summary>
+    public event Action<byte[]>? RawOutput;
+
+    /// <summary>Push-based agent status (set via the control API), and a change notification.</summary>
+    public AgentStatus Status { get; private set; } = AgentStatus.Idle;
+    public event Action? StatusChanged;
+
+    /// <summary>Epoch seconds of the last status WRITE. Seeded at construction so a session whose
+    /// status was never set still reports its own age instead of 0.</summary>
+    public long StatusChangedAt { get; private set; } = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+    /// <summary>Test seam: back-date the status stamp, so a re-assert's re-stamp is observable
+    /// without sleeping out a whole epoch second on every run.</summary>
+    internal void BackdateStatus(long epochSeconds) => StatusChangedAt = epochSeconds;
+
+    /// <summary>Pulse the status dot (and title-bar bell) while this status is live (agterm's blinking attention).</summary>
+    public bool Blink { get; private set; }
+
+    /// <summary>Clear the status back to idle when the session is next selected (agterm's auto-reset-on-select).</summary>
+    public bool AutoReset { get; private set; }
+
+    /// <summary>Raised (background thread) when a status change requests an audible cue. The argument is the
+    /// requested sound spec (a system-sound name or a .wav path); null means "use the default alert sound".</summary>
+    public event Action<string?>? SoundRequested;
+
+    /// <summary>Set the agent status, optionally with a blink pulse, auto-reset-on-select, and an audible cue.</summary>
+    public void SetStatus(AgentStatus status, bool blink = false, bool autoReset = false,
+        bool sound = false, string? soundName = null)
+    {
+        // Blink / auto-reset only make sense for a live (non-idle) status.
+        bool newBlink = blink && status != AgentStatus.Idle;
+        bool newAuto = autoReset && status != AgentStatus.Idle;
+        bool changed = Status != status || Blink != newBlink || AutoReset != newAuto;
+        Status = status;
+        Blink = newBlink;
+        AutoReset = newAuto;
+        // Stamped on EVERY write, including a no-op re-assert of the same status. This looks like a
+        // bug and is not: the question callers ask of this timestamp is "is that agent's hook still
+        // alive", and a hook re-asserting `active` every 30s is precisely the liveness signal. Were
+        // repeats collapsed, a healthy long-running agent would report the age of its FIRST write
+        // and be indistinguishable from one whose hook died. StatusChanged still fires on change
+        // only — the repaint it drives has no reason to run for a no-op.
+        StatusChangedAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (sound && status != AgentStatus.Idle)
+            try { SoundRequested?.Invoke(soundName); } catch { /* playback is best-effort */ }
+        if (changed) StatusChanged?.Invoke();
+    }
+
+    /// <summary>User activity (typing/focus) clears a blocked/completed status, matching agterm.</summary>
+    public void NotifyActivity()
+    {
+        if (Status is AgentStatus.Blocked or AgentStatus.Completed)
+            SetStatus(AgentStatus.Idle);
+    }
+
+    /// <summary>Lock held while the emulator is mutated; renderers should lock this while reading the grid.</summary>
+    public object SyncRoot => _sync;
+
+    /// <summary>When set (UI process, `emulator-core = rust`), new sessions build their
+    /// terminal core through this instead of the managed <see cref="TerminalEmulator"/>.</summary>
+    public static Func<int, int, ITerminalCore>? CoreFactory;
+
+    public TerminalSession(int cols, int rows)
+    {
+        Cols = cols;
+        Rows = rows;
+        // The emulator-core seam (`emulator-core = rust`): the UI process installs a factory;
+        // headless contexts (tests, the pty-host process) stay on the managed core.
+        Emulator = CoreFactory?.Invoke(cols, rows) ?? new TerminalEmulator(cols, rows);
+    }
+
+    /// <summary>The ConPTY this session is created on; null = <see cref="ConPtyApi.Current"/>.</summary>
+    public ConPtyApi? Conpty { get; init; }
+
+    /// <summary>True once the session runs on the shipped ConPTY, which passes output through and so
+    /// does not repaint the viewport on a resize.</summary>
+    public bool OnBundledConpty { get; private set; }
+
+    /// <summary>Porta.Pty binds CreatePseudoConsole to kernel32, so a session on the shipped ConPTY
+    /// (<see cref="ConPtyApi"/>, #339) is created by <see cref="ConPtyConnection"/> instead. The inbox
+    /// path stays on Porta.Pty.</summary>
+    private Task<IPtyConnection> SpawnAsync(PtyOptions options, CancellationToken ct)
+    {
+        var api = Conpty ?? ConPtyApi.Current;
+        if (!api.Bundled) return PtyProvider.SpawnAsync(options, ct);
+        OnBundledConpty = true;
+        IPtyConnection conn = ConPtyConnection.Spawn(api, CommandLineOf(options.App, options.CommandLine, options.VerbatimCommandLine),
+            options.Cwd, options.Environment, options.Cols, options.Rows, deElevate: false);
+        return Task.FromResult(conn);
+    }
+
+    private static string CommandLineOf(string app, string[]? commandLine, bool verbatim) =>
+        commandLine is { Length: > 0 }
+            ? QuoteArg(app) + " " + (verbatim ? string.Join(' ', commandLine) : string.Join(' ', Array.ConvertAll(commandLine, QuoteArg)))
+            : QuoteArg(app);
+
+    /// <summary>Spawn <paramref name="app"/> and pump its output until it exits. Returns the exit code.</summary>
+    /// <remarks>
+    /// ConPTY's output pipe is NOT closed when the child exits (conhost keeps it open), so a
+    /// read-to-EOF loop would block forever. Instead we detect process exit explicitly via
+    /// <see cref="IPtyConnection.WaitForExit"/>, allow a short drain for buffered output, then
+    /// cancel the reader.
+    /// </remarks>
+    public async Task<int> RunAsync(string app, string[] commandLine, bool verbatimCommandLine = false, CancellationToken ct = default)
+    {
+        var options = new PtyOptions
+        {
+            Name = "wagterm",
+            Cols = Cols,
+            Rows = Rows,
+            Cwd = Environment.CurrentDirectory,
+            App = app,
+            CommandLine = commandLine,
+            VerbatimCommandLine = verbatimCommandLine,
+        };
+
+        _connection = await SpawnAsync(options, ct).ConfigureAwait(false);
+
+        using var readerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        Task readerTask = PumpAsync(_connection.ReaderStream, readerCts.Token);
+
+        // Wait for the child to exit on a background thread (WaitForExit is blocking).
+        await Task.Run(() => _connection.WaitForExit(Timeout.Infinite), ct).ConfigureAwait(false);
+        MarkInputClosed();
+
+        // Let the reader drain output already buffered in the pipe, then stop it.
+        await Task.Delay(250, ct).ConfigureAwait(false);
+        await readerCts.CancelAsync().ConfigureAwait(false);
+        try { await readerTask.ConfigureAwait(false); } catch { /* reader cancelled */ }
+
+        return _connection.ExitCode;
+    }
+
+    private async Task PumpAsync(Stream stream, CancellationToken ct)
+    {
+        var buffer = new byte[4096];
+        try
+        {
+            while (true)
+            {
+                int n = await stream.ReadAsync(buffer.AsMemory(), ct).ConfigureAwait(false);
+                if (n <= 0) break;
+                lock (_sync) Emulator.Feed(buffer.AsSpan(0, n));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (IOException) { }
+    }
+
+    /// <summary>Quote one argument per the CommandLineToArgvW rules, so a joined command line round-trips
+    /// back to the same argv (handles the -Command &lt;multiline script&gt; case).</summary>
+    internal static string QuoteArg(string arg)
+    {
+        if (arg.Length > 0 && arg.IndexOfAny(new[] { ' ', '\t', '\n', '\v', '"' }) < 0) return arg;
+        var sb = new System.Text.StringBuilder("\"");
+        for (int i = 0; ; i++)
+        {
+            int slashes = 0;
+            while (i < arg.Length && arg[i] == '\\') { i++; slashes++; }
+            if (i == arg.Length) { sb.Append('\\', slashes * 2); break; }
+            if (arg[i] == '"') sb.Append('\\', slashes * 2 + 1).Append('"');
+            else sb.Append('\\', slashes).Append(arg[i]);
+        }
+        return sb.Append('"').ToString();
+    }
+
+    /// <summary>Spawn an interactive shell and pump its output in the background until it exits or is disposed.
+    /// When <paramref name="deElevate"/> is set, the shell runs at the interactive user's Medium integrity
+    /// (only valid from an elevated wagterm) so an elevated window can host a normal session.
+    /// A spawn that FAILS (the cwd gone, the app missing) is painted into this pane and ends it as
+    /// exit 1 with <see cref="HasExited"/> set and <see cref="Exited"/> NOT raised — the surface
+    /// stays to show the reason (#227 r2). The pty-host calls <see cref="StartOrThrowAsync"/>
+    /// instead, so the failure travels back to its client as the create's error.</summary>
+    public Task StartAsync(string app, string[] commandLine, bool verbatimCommandLine = false,
+        IReadOnlyDictionary<string, string>? extraEnv = null, string? cwd = null, bool deElevate = false,
+        bool freshEnv = true, CancellationToken ct = default)
+        => StartCoreAsync(app, commandLine, verbatimCommandLine, extraEnv, cwd, deElevate, freshEnv, ct, paintFailure: true);
+
+    /// <summary>The <see cref="StartAsync"/> form for a host that owns the failure: a spawn that fails
+    /// THROWS to the caller (PtyHostServer turns it into the create's error and rolls the session
+    /// back) instead of being painted here, where no client could read it — the host's emulator is
+    /// not what the client shows, and the client's own start catch is what paints the reason.</summary>
+    public Task StartOrThrowAsync(string app, string[] commandLine, bool verbatimCommandLine = false,
+        IReadOnlyDictionary<string, string>? extraEnv = null, string? cwd = null, bool deElevate = false,
+        bool freshEnv = true, CancellationToken ct = default)
+        => StartCoreAsync(app, commandLine, verbatimCommandLine, extraEnv, cwd, deElevate, freshEnv, ct, paintFailure: false);
+
+    private async Task StartCoreAsync(string app, string[] commandLine, bool verbatimCommandLine,
+        IReadOnlyDictionary<string, string>? extraEnv, string? cwd, bool deElevate,
+        bool freshEnv, CancellationToken ct, bool paintFailure)
+    {
+        Dictionary<string, string>? env = null;
+        if (extraEnv is not null || freshEnv || Environment.GetEnvironmentVariables().Keys.Cast<string>().Any(ProductEnvironment.IsUpstreamVariable))
+        {
+            // Base environment: rebuilt fresh from the registry (so software installed while this
+            // process runs — a JDK, a PATH entry — is visible in the child without a restart;
+            // matters double for the long-lived pty-host). Fallback, and the freshEnv=false path:
+            // copy this process's inherited env, the pre-fresh-env behavior. Then our additions.
+            env = freshEnv ? FreshEnvironment.TryBuild() : null;
+            if (env is null)
+            {
+                env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables())
+                    env[(string)e.Key] = e.Value as string ?? "";
+            }
+            if (extraEnv is not null) foreach (var kv in extraEnv) env[kv.Key] = kv.Value;
+            ProductEnvironment.RemoveUpstreamVariables(env);
+        }
+
+        if (deElevate)
+        {
+            // Manual pseudoconsole with the interactive user's token (Porta.Pty can't drop integrity).
+            string cmd = CommandLineOf(app, commandLine, verbatimCommandLine);
+            IPtyConnection dc;
+            try
+            {
+                var api = Conpty ?? ConPtyApi.Current;
+                dc = ConPtyConnection.Spawn(api, cmd, string.IsNullOrEmpty(cwd) ? Environment.CurrentDirectory : cwd,
+                    env, Cols, Rows, deElevate: true);
+                OnBundledConpty = api.Bundled;
+            }
+            catch (Exception ex) when (paintFailure)
+            {
+                // Surface the failure in the pane instead of leaving it dead (or crashing on the unobserved task).
+                // The pty-host's form (StartOrThrowAsync) lets it throw, the same as the ordinary spawn below.
+                var msg = $"\r\n\x1b[31m[wagterm] could not start a non-elevated session:\x1b[0m\r\n  {ex.Message}\r\n";
+                lock (_sync) Emulator.Feed(System.Text.Encoding.UTF8.GetBytes(msg));
+                OutputReceived?.Invoke();
+                MarkInputClosed(); ExitCode = 1; HasExited = true;
+                return;
+            }
+            _connection = dc;
+            _ = StartPump(dc.ReaderStream);
+            _ = Task.Run(() =>
+            {
+                try { dc.WaitForExit(Timeout.Infinite); } catch { }
+                MarkInputClosed();
+                int code = 0; try { code = dc.ExitCode; } catch { }
+                SettleOutput();
+                ExitCode = code; HasExited = true;
+                try { Exited?.Invoke(code); } catch { }
+            }, ct);
+            return;
+        }
+
+        var options = new PtyOptions
+        {
+            Name = "wagterm",
+            Cols = Cols,
+            Rows = Rows,
+            Cwd = string.IsNullOrEmpty(cwd) ? Environment.CurrentDirectory : cwd,
+            App = app,
+            CommandLine = commandLine,
+            VerbatimCommandLine = verbatimCommandLine,
+        };
+
+        if (env is not null) options.Environment = env;
+
+        IPtyConnection conn;
+        try { conn = await SpawnAsync(options, ct).ConfigureAwait(false); }
+        catch (Exception ex) when (paintFailure && ex is not OperationCanceledException)
+        {
+            // Same shape as the de-elevate branch above and ServerSession.StartAsync: a spawn that
+            // fails (the cwd gone, the app missing) surfaces IN the pane and ends as exit 1, with
+            // HasExited set and Exited NOT raised (the surface stays to show the reason). Before,
+            // the failure escaped as a faulted fire-and-forget task: a dead blank pane, and an
+            // overlay watcher keyed on HasExited never saw an end (#227 r2). Not for the pty-host
+            // (StartOrThrowAsync): there the throw IS the client's diagnostic.
+            var msg = $"\r\n\x1b[31m[wagterm] could not start the session:\x1b[0m\r\n  {ex.Message}\r\n";
+            lock (_sync) Emulator.Feed(System.Text.Encoding.UTF8.GetBytes(msg));
+            OutputReceived?.Invoke();
+            MarkInputClosed(); ExitCode = 1; HasExited = true;
+            return;
+        }
+        _connection = conn;
+        _ = StartPump(conn.ReaderStream);
+        // Watch for the child exiting so overlays (and anyone else) get the real ConPTY exit code,
+        // reliably even for programs that finish faster than a PID poll could catch them.
+        _ = Task.Run(() =>
+        {
+            try { conn.WaitForExit(Timeout.Infinite); } catch { }
+            MarkInputClosed();
+            int code = 0; try { code = conn.ExitCode; } catch { }
+            SettleOutput();
+            ExitCode = code; HasExited = true;
+            try { Exited?.Invoke(code); } catch { }
+        }, ct);
+    }
+
+    /// <summary>The child is gone, but what it wrote last may still be in flight: conhost flushes the
+    /// pseudoconsole's output after the process exits and the pipe never hits EOF, so "the process has
+    /// exited" is not "the pane is complete". Wait until one 50 ms window passes with no new bytes
+    /// from the pump, at most 500 ms, BEFORE <see cref="HasExited"/> and <see cref="Exited"/> say the
+    /// session ended — an overlay's `exit N`, the pty-host's data-pipe close (the client's EOF), and
+    /// any handler that reads the grid then see the whole output (#246; <see cref="RunAsync"/> waited
+    /// a fixed 250 ms for the same reason). A chunk the pump has read but not yet fed (the feed waits
+    /// on <see cref="_sync"/> — a reattach snapshot can hold it) is not settled either, whatever the
+    /// count says. A pump that has already stopped (Dispose closed the stream) costs one window; the
+    /// cap bounds an exit, never a hang — a chunk still in flight at the cap is cut off.</summary>
+    private void SettleOutput()
+    {
+        long seen = Interlocked.Read(ref _pumpBytes);
+        for (int i = 0; i < 10; i++)
+        {
+            Thread.Sleep(50);
+            long now = Interlocked.Read(ref _pumpBytes);
+            if (now == seen && Volatile.Read(ref _pumpInFlight) == 0) return;
+            seen = now;
+        }
+    }
+
+    /// <summary>Attach to an <b>externally-created</b> pseudoconsole (the Windows default-terminal handoff,
+    /// or a test harness) instead of spawning our own. <paramref name="conOut"/> is where console VT output
+    /// is read; <paramref name="conIn"/> is where user input is written; <paramref name="signal"/> is the
+    /// ConPTY signal pipe; <paramref name="clientProcess"/> is the console client's handle (optional, for
+    /// exit detection). Pumps output into the emulator and reports exit on client death or output EOF.</summary>
+    public void Attach(SafeFileHandle conOut, SafeFileHandle conIn, SafeFileHandle signal, IntPtr clientProcess, int pid)
+    {
+        var conn = new AttachedPty(conOut, conIn, signal, clientProcess, pid);
+        _connection = conn;
+        var pump = StartPump(conn.ReaderStream);
+        _ = Task.Run(async () =>
+        {
+            if (clientProcess != IntPtr.Zero) { await Task.Run(() => conn.WaitForExit(Timeout.Infinite)).ConfigureAwait(false); MarkInputClosed(); SettleOutput(); }
+            else await pump.ConfigureAwait(false);   // no client handle → exit when the output pipe hits EOF (already drained)
+            MarkInputClosed();
+            int code = 0; try { code = conn.ExitCode; } catch { }
+            ExitCode = code; HasExited = true;
+            try { Exited?.Invoke(code); } catch { }
+        });
+        conn.Resize(Cols, Rows);   // tell the console our initial size
+    }
+
+    /// <summary>The child's exit code once <see cref="HasExited"/> is true (null while still running).</summary>
+    public int? ExitCode { get; private set; }
+    public bool HasExited { get; private set; }
+    private volatile bool _inputClosed;
+    public bool InputClosed => _inputClosed;
+    internal void MarkInputClosed() => _inputClosed = true;
+    /// <summary>Raised (on a background thread) when the child process exits, with its exit code.</summary>
+    public event Action<int>? Exited;
+
+    private static readonly string? DumpPath =
+        Environment.GetEnvironmentVariable("WAGTERM_DUMP") is { Length: > 0 } d ? d : null;
+
+    /// <summary>Run the output pump on a dedicated thread (LongRunning → not a pool thread, still awaitable).
+    /// The ConPTY read pipe is a synchronous handle, so Stream.ReadAsync on it goes through the
+    /// async-over-sync layer — profiling showed that machinery dominating CPU under sustained output
+    /// (~3k lines/s). A plain blocking Read on a dedicated thread is a bare syscall per chunk.</summary>
+    private Task StartPump(Stream stream) =>
+        Task.Factory.StartNew(() => PumpLoop(stream), CancellationToken.None,
+            TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+    private void PumpLoop(Stream stream)
+    {
+        var buffer = new byte[64 * 1024];
+        try
+        {
+            while (true)
+            {
+                int n = stream.Read(buffer, 0, buffer.Length);
+                if (n <= 0) break;
+                Volatile.Write(ref _pumpInFlight, 1);
+                if (DumpPath is not null)
+                    lock (_sync) System.IO.File.AppendAllBytes(DumpPath, buffer.AsSpan(0, n).ToArray());
+                // The tap runs under the same lock as the feed, so a reattach that snapshots the
+                // screen under it gets each chunk once: in the snapshot or through the tap.
+                lock (_sync)
+                {
+                    Emulator.Feed(buffer.AsSpan(0, n));
+                    if (RawOutput is { } tap) tap(buffer[..n]);
+                }
+                Interlocked.Add(ref _pumpBytes, n);   // after the feed and the tap: "settled" means both have it
+                Volatile.Write(ref _pumpInFlight, 0);
+                OutputReceived?.Invoke();
+            }
+        }
+        catch (IOException) { }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }   // Dispose() closed the stream mid-read — normal shutdown
+    }
+
+    /// <summary>
+    /// Feed bytes directly into the emulator (NOT through the PTY). Used by the control
+    /// API to inject content, and to deliver graphics sequences that ConPTY would strip
+    /// from a child process's output.
+    /// </summary>
+    public void Inject(ReadOnlySpan<byte> bytes)
+    {
+        lock (_sync) Emulator.Feed(bytes);
+        OutputReceived?.Invoke();
+    }
+
+    /// <summary>
+    /// Mutate the emulator directly under the render lock, then signal a repaint. Used to place
+    /// images without pushing a large base64 payload through the parser under the lock.
+    /// </summary>
+    public void MutateLocked(Action<ITerminalCore> mutate)
+    {
+        lock (_sync) mutate(Emulator);
+        OutputReceived?.Invoke();
+    }
+
+    /// <summary>Send bytes (e.g. keystrokes) to the child's input.</summary>
+    public void Write(ReadOnlySpan<byte> bytes)
+    {
+        if (InputClosed) throw new IOException("Session input is closed.");
+        var stream = _connection?.WriterStream ?? throw new InvalidOperationException("Session not started.");
+        try { stream.Write(bytes); stream.Flush(); }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        { MarkInputClosed(); throw; }
+    }
+
+    public void Resize(int cols, int rows)
+    {
+        if (cols <= 0 || rows <= 0) return;
+        lock (_sync) Emulator.Resize(cols, rows);
+        Cols = cols;
+        Rows = rows;
+        _connection?.Resize(cols, rows);
+    }
+
+    /// <summary>Thread-safe snapshot of a single grid row's text.</summary>
+    public string SnapshotRow(int row)
+    {
+        lock (_sync) return Emulator.DumpRow(row);
+    }
+
+    /// <summary>Thread-safe snapshot of the caret's grid position (same lock as <see cref="SnapshotRow"/>).</summary>
+    public (int Row, int Col) SnapshotCursor()
+    {
+        lock (_sync) return (Emulator.CursorRow, Emulator.CursorCol);
+    }
+
+    /// <summary>In-process sessions cannot outlive the process — detach IS dispose here.</summary>
+    public void Detach() => Dispose();
+
+    /// <summary>The host's creation ledger must not confuse best-effort Dispose with proof.
+    /// Called by the attempt's sole cleanup owner, only after spawn has finished.</summary>
+    internal bool DisposeHosted()
+    {
+        MarkInputClosed();
+        var connection = _connection;
+        if (connection is null) return true; // creation failed before obtaining a connection
+        if (!HostedCleanup.TryComplete(connection.WaitForExit, connection.Kill, connection.Dispose)) return false;
+        _connection = null;
+        return true;
+    }
+
+    public void Dispose()
+    {
+        MarkInputClosed();
+        var c = _connection;
+        _connection = null;
+        try { c?.Kill(); } catch { /* already exited */ }
+        // Dispose closes the pseudoconsole + pipes. Without it the ConPTY output pipe never EOFs
+        // (killing the child is not enough), so the pump task stays blocked in ReadAsync forever —
+        // leaking one thread-pool thread (~1MB stack) plus the ConPTY/pipe/process handles per
+        // closed session. Found by tools/profile-memory.ps1.
+        try { c?.Dispose(); } catch { }
+    }
+}

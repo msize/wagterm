@@ -52,7 +52,7 @@ func TestFindGitBashRejectsUnrelatedPathBash(t *testing.T) {
 func TestRunInKillOnCloseJobSuspendsTheProductionChildBeforeAssignment(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "started")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestLauncherHelperProcess$")
-	cmd.Env = append(os.Environ(), "AGW_LAUNCH_HELPER=1", "AGW_LAUNCH_MARKER="+marker)
+	cmd.Env = append(os.Environ(), "WAG_LAUNCH_HELPER=1", "WAG_LAUNCH_MARKER="+marker)
 
 	checkpoint := make(chan *exec.Cmd, 1)
 	release := make(chan struct{})
@@ -109,10 +109,10 @@ func TestRunInKillOnCloseJobSuspendsTheProductionChildBeforeAssignment(t *testin
 }
 
 func TestLauncherHelperProcess(t *testing.T) {
-	if os.Getenv("AGW_LAUNCH_HELPER") != "1" {
+	if os.Getenv("WAG_LAUNCH_HELPER") != "1" {
 		return
 	}
-	if err := os.WriteFile(os.Getenv("AGW_LAUNCH_MARKER"), []byte("started"), 0o600); err != nil {
+	if err := os.WriteFile(os.Getenv("WAG_LAUNCH_MARKER"), []byte("started"), 0o600); err != nil {
 		os.Exit(3)
 	}
 	os.Exit(0)
@@ -131,9 +131,9 @@ func TestProcessIsAssignedBeforeItCanExecute(t *testing.T) {
 	// line is spelled out so cmd's own quoting rules apply, not Go's argument escaping.
 	cmd := exec.Command("cmd.exe")
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine: `cmd.exe /d /s /c "echo started>"%AGW_LAUNCH_MARKER%" & ping -n 61 127.0.0.1 >nul"`,
+		CmdLine: `cmd.exe /d /s /c "echo started>"%WAG_LAUNCH_MARKER%" & ping -n 61 127.0.0.1 >nul"`,
 	}
-	cmd.Env = append(os.Environ(), "AGW_LAUNCH_MARKER="+marker)
+	cmd.Env = append(os.Environ(), "WAG_LAUNCH_MARKER="+marker)
 	if err := startProcessInJob(cmd, job, func(pid int) error {
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
 			t.Fatalf("child executed before job assignment: marker err=%v", err)

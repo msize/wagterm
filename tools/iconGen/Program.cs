@@ -5,7 +5,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 
-// agwinterm app icon generator — three variants.
+// wagterm app icon generator — three variants.
 //  v1 "signal" : chevron + block cursor + green agent-status dot (identity)
 //  v2 "clean"  : bold centered ">_" prompt, cyan, no dot (pure terminal)
 //  v3 "gradient": chevron with cyan->blue gradient + cursor + small dot
@@ -27,7 +27,7 @@ static class Program
                 pngs.Add((s, ms.ToArray()));
                 if (s == 256) File.WriteAllBytes(Path.Combine(outDir, $"preview-{v}.png"), ms.ToArray());
             }
-            WriteIco(Path.Combine(outDir, $"agwinterm-{v}.ico"), pngs);
+            WriteIco(Path.Combine(outDir, $"wagterm-{v}.ico"), pngs);
         }
         Console.WriteLine("done");
     }

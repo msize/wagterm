@@ -1,4 +1,4 @@
-# Agwinterm-only Win32 control-host integration checks.
+# Wagterm-only Win32 control-host integration checks.
 #
 # Keep these out of tests/conformance: that runner is the portable control-API floor shared with
 # agliteterm, while auxiliary covers and live pane geometry belong only to the full Win32 host.
@@ -13,16 +13,16 @@ param(
 $ErrorActionPreference = 'Stop'
 $fail = 0
 
-if (('Agwinterm.Win32ControlTest.NativeMethods' -as [type]) -and
-    -not ('Agwinterm.Win32ControlTest.NativeMethods' -as [type]).GetMethod('Chord')) {
+if (('Wagterm.Win32ControlTest.NativeMethods' -as [type]) -and
+    -not ('Wagterm.Win32ControlTest.NativeMethods' -as [type]).GetMethod('Chord')) {
     throw 'a NativeMethods type from an older run of this script is loaded in this shell (no Chord); run it from a fresh pwsh'
 }
-if (-not ('Agwinterm.Win32ControlTest.NativeMethods' -as [type])) {
+if (-not ('Wagterm.Win32ControlTest.NativeMethods' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
-namespace Agwinterm.Win32ControlTest
+namespace Wagterm.Win32ControlTest
 {
     public static class NativeMethods
     {
@@ -51,7 +51,7 @@ namespace Agwinterm.Win32ControlTest
         [DllImport("user32.dll")] static extern bool GetKeyboardState(byte[] s);
 
         /// <summary>Ctrl (+Shift) + key through the window's own key path — the same shape as
-        /// AgwUi.Chord in tests/ui/lib.ps1. A posted WM_KEYDOWN cannot make GetKeyState see the
+        /// WagUi.Chord in tests/ui/lib.ps1. A posted WM_KEYDOWN cannot make GetKeyState see the
         /// modifier, so this attaches to the target's input queue and sets the shared key state for
         /// the duration. Scoped to this instance; nothing is injected globally.</summary>
         public static void Chord(IntPtr h, int vk, bool shift) {
@@ -79,7 +79,7 @@ namespace Agwinterm.Win32ControlTest
 # copy out of a browser or Word would be lost, and an image-only clipboard reads as empty text). The
 # guard's states and its fake-clipboard tests: clipboard-guard.ps1 / clipboard-guard.tests.ps1.
 . (Join-Path $PSScriptRoot 'clipboard-guard.ps1')
-$clipboardGuard = [Agwinterm.Win32ControlTest.ClipboardGuard]
+$clipboardGuard = [Wagterm.Win32ControlTest.ClipboardGuard]
 # The process the P6 paste cases paste INTO — a sink the control API starts directly, no shell underneath —
 # and the readiness test that gates them: paste-sink.ps1 (its header says why) / paste-sink.tests.ps1.
 . (Join-Path $PSScriptRoot 'paste-sink.ps1')
@@ -105,9 +105,9 @@ function Resolve-Binary([string]$explicit, [string]$name, [string]$projectDir, [
                    Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName)
     }
     # The installed binary is acceptable for the ctl CLIENT only: it talks to the pipe named below
-    # and nothing else. The APP must be a build from this tree - an older installed agwinterm that
+    # and nothing else. The APP must be a build from this tree - an older installed wagterm that
     # does not honour --app-id would start against the user's real data directory with --no-restore.
-    if ($AllowInstalled) { $roots += "$env:LOCALAPPDATA\Programs\agwinterm\$name" }
+    if ($AllowInstalled) { $roots += "$env:LOCALAPPDATA\Programs\wagterm\$name" }
     foreach ($candidate in $roots) {
         if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $candidate }
     }
@@ -115,39 +115,39 @@ function Resolve-Binary([string]$explicit, [string]$name, [string]$projectDir, [
 }
 
 "== Win32 control-host integration =="
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl' -AllowInstalled
-$Exe = Resolve-Binary $Exe 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-if (-not $ctl) { "  SKIP  agwintermctl not found (set AGWINTERMCTL)"; exit ($Strict ? 1 : 0) }
-if (-not $Exe) { "  SKIP  agwinterm build not found (build src\Agwinterm.Win32 or pass -Exe)"; exit ($Strict ? 1 : 0) }
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl' -AllowInstalled
+$Exe = Resolve-Binary $Exe 'wagterm.exe' 'Wagterm.Win32'
+if (-not $ctl) { "  SKIP  wagtermctl not found (set WAGTERMCTL)"; exit ($Strict ? 1 : 0) }
+if (-not $Exe) { "  SKIP  wagterm build not found (build src\Wagterm.Win32 or pass -Exe)"; exit ($Strict ? 1 : 0) }
 "  using: $(Split-Path $Exe -Leaf) from $(Split-Path $Exe -Parent)"
 
 # Do not inherit routing from the developer's current terminal. This process gets its own pipe and
 # every mutation below is sent only to the process this script starts. Dot-sourced or run from a
-# pane inside agwinterm, these are the caller's own routing variables, so they are put back at the
+# pane inside wagterm, these are the caller's own routing variables, so they are put back at the
 # end rather than left pointing at a pipe that no longer exists.
 $savedEnv = @{}
-foreach ($name in 'AGWINTERM_SESSION_ID', 'AGWINTERM_PANE_ID', 'AGWINTERM_PIPE', 'AGWINTERM_APP_ID', 'AGWINTERM_DUMP') {
+foreach ($name in 'WAGTERM_SESSION_ID', 'WAGTERM_PANE_ID', 'WAGTERM_PIPE', 'WAGTERM_APP_ID', 'WAGTERM_DUMP') {
     $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name)
 }
-$env:AGWINTERM_SESSION_ID = $null
-$env:AGWINTERM_PANE_ID = $null
-$env:AGWINTERM_PIPE = $null
-# AGWINTERM_DUMP makes every TerminalSession copy its raw output to a file. The P6 paste cases run
+$env:WAGTERM_SESSION_ID = $null
+$env:WAGTERM_PANE_ID = $null
+$env:WAGTERM_PIPE = $null
+# WAGTERM_DUMP makes every TerminalSession copy its raw output to a file. The P6 paste cases run
 # on the shared desktop with the user's clipboard on the line, so the sandbox app must not inherit
 # a dump path from the caller's shell: cleared here, put back with the rest at the end.
-$env:AGWINTERM_DUMP = $null
+$env:WAGTERM_DUMP = $null
 $testToken = [guid]::NewGuid().ToString('N')
 $pipe = 'win32-control-' + $testToken.Substring(0, 12)
-$appId = 'agwinterm-win32-control-' + $testToken
+$appId = 'wagterm-win32-control-' + $testToken
 # Two throwaway identities, not one. Startup saves state synchronously (a workspace and a session
 # are created and SaveState runs before the pipe answers), so an app that ignored --app-id would
 # have rewritten its fallback identity's saved state before anything here could notice. A Release
-# build's fallback is AGWINTERM_APP_ID; point that at a SECOND unique directory so the fallback is
+# build's fallback is WAGTERM_APP_ID; point that at a SECOND unique directory so the fallback is
 # still nothing of the user's, then treat its appearance as the failure it is. (A Debug build's
-# fallback is the fixed "agwinterm-dev"; a build from this tree cannot fall that far, which is why
+# fallback is the fixed "wagterm-dev"; a build from this tree cannot fall that far, which is why
 # Resolve-Binary refuses an installed app above.)
 $envAppId = $appId + '-env'
-$env:AGWINTERM_APP_ID = $envAppId
+$env:WAGTERM_APP_ID = $envAppId
 $localAppDataRoot = [IO.Path]::GetFullPath(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)).TrimEnd('\')
 function Resolve-TestAppDir([string]$id) {
@@ -162,12 +162,12 @@ function Resolve-TestAppDir([string]$id) {
 }
 $testAppDir = Resolve-TestAppDir $appId
 $envAppDir = Resolve-TestAppDir $envAppId
-$captureFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-cover-id-" + [guid]::NewGuid().ToString('N') + '.txt')
-$releaseFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-release-pane-" + [guid]::NewGuid().ToString('N') + '.signal')
-$mouseCellReadyFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-mouse-cell-ready-" + [guid]::NewGuid().ToString('N') + '.signal')
-$mousePixelReadyFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-mouse-pixel-ready-" + [guid]::NewGuid().ToString('N') + '.signal')
-$mouseCellFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-mouse-cell-" + [guid]::NewGuid().ToString('N') + '.txt')
-$mousePixelFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-mouse-pixel-" + [guid]::NewGuid().ToString('N') + '.txt')
+$captureFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-cover-id-" + [guid]::NewGuid().ToString('N') + '.txt')
+$releaseFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-release-pane-" + [guid]::NewGuid().ToString('N') + '.signal')
+$mouseCellReadyFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-mouse-cell-ready-" + [guid]::NewGuid().ToString('N') + '.signal')
+$mousePixelReadyFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-mouse-pixel-ready-" + [guid]::NewGuid().ToString('N') + '.signal')
+$mouseCellFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-mouse-cell-" + [guid]::NewGuid().ToString('N') + '.txt')
+$mousePixelFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-mouse-pixel-" + [guid]::NewGuid().ToString('N') + '.txt')
 
 function Invoke-Ctl($argv) {
     $argv = [string[]]@($argv)
@@ -216,9 +216,9 @@ function Get-ActiveSessionSnapshot {
 
 function Send-TestClick([IntPtr]$hwnd, [int]$x, [int]$y) {
     $packed = (($y -band 0xffff) -shl 16) -bor ($x -band 0xffff)
-    [void][Agwinterm.Win32ControlTest.NativeMethods]::SendMessageW(
+    [void][Wagterm.Win32ControlTest.NativeMethods]::SendMessageW(
         $hwnd, 0x0201, [IntPtr]1, [IntPtr]$packed)
-    [void][Agwinterm.Win32ControlTest.NativeMethods]::SendMessageW(
+    [void][Wagterm.Win32ControlTest.NativeMethods]::SendMessageW(
         $hwnd, 0x0202, [IntPtr]0, [IntPtr]$packed)
 }
 
@@ -241,7 +241,7 @@ try {
     # is why the env fallback above exists: a process that ignored --app-id wrote to $envAppDir, and
     # that directory existing is the proof.
     $appDataAdopted = (Test-Path -LiteralPath $testAppDir -PathType Container) -and
-        (Test-Path -LiteralPath (Join-Path $testAppDir 'agwinterm.conf') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $testAppDir 'wagterm.conf') -PathType Leaf) -and
         (Test-Path -LiteralPath (Join-Path $testAppDir 'profiles.json') -PathType Leaf)
     Check 'the Win32 instance adopts its dedicated app-data namespace' $appDataAdopted $testAppDir
     Check 'the Win32 instance did not fall back to the environment app-id' `
@@ -642,7 +642,7 @@ try {
         Invoke-Ctl @('quick', 'on') | Out-Null
         Start-Sleep -Seconds 2
         $captureLiteral = $captureFile.Replace("'", "''")
-        $captureCommand = "Set-Content -LiteralPath '$captureLiteral' -Value `$env:AGWINTERM_SESSION_ID -Encoding utf8`r"
+        $captureCommand = "Set-Content -LiteralPath '$captureLiteral' -Value `$env:WAGTERM_SESSION_ID -Encoding utf8`r"
         Invoke-Ctl @('session', 'type', $captureCommand, '--target', 'active', '--window', 'quick') | Out-Null
         for ($i = 0; $i -lt 40 -and -not (Test-Path -LiteralPath $captureFile); $i++) {
             Start-Sleep -Milliseconds 250
@@ -734,7 +734,7 @@ try {
         $blockCodes = @{ }; $blockCodes[$blockIds[0]] = 11; $blockCodes[$blockIds[1]] = 22; $blockCodes[$blockIds[2]] = 33
         $blockProcs = @{ }
         foreach ($id in $blockIds) {
-            $outFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-block-" + [guid]::NewGuid().ToString('N') + '.json')
+            $outFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-block-" + [guid]::NewGuid().ToString('N') + '.json')
             # Each program waits ~1.5 s before exiting so all three opens are parked at the same time.
             $blockProcs[$id] = @{
                 File = $outFile
@@ -763,7 +763,7 @@ try {
         # A blocking open whose overlay is REPLACED before its program exits is released with
         # "closed" — its own outcome — not parked, and not handed the replacement's code. Dispose
         # ends the pty without raising Exited, so before #227 nothing released it at all.
-        $replacedFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-block-" + [guid]::NewGuid().ToString('N') + '.json')
+        $replacedFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-block-" + [guid]::NewGuid().ToString('N') + '.json')
         $replacedProc = Start-Process $ctl -ArgumentList @('session', 'overlay', 'open', "`"ping -n 60 127.0.0.1 >nul & exit 44`"",
             '--block', '--target', $blockIds[0], '--pipe', $pipe, '--json') -NoNewWindow -PassThru -RedirectStandardOutput $replacedFile
         $replacedUp = $false
@@ -804,7 +804,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         $hammerEncoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($hammerScript))
         $hammers = @()
         foreach ($h in 1, 2) {
-            $hFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-hammer-" + [guid]::NewGuid().ToString('N') + '.txt')
+            $hFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-hammer-" + [guid]::NewGuid().ToString('N') + '.txt')
             $hammers += @{ File = $hFile; Proc = Start-Process pwsh -ArgumentList @('-NoLogo', '-NoProfile', '-EncodedCommand', $hammerEncoded) -NoNewWindow -PassThru -RedirectStandardOutput $hFile }
         }
         $resizeReplies = @(); $resizeBad = @(); $resizeAfterGone = @(); $seenGone = $false
@@ -849,7 +849,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         # the in-process backend too (the default), not a wait without end. The fixture is a
         # session whose launch dir is deleted under it: its own process moved to C:\ first so the
         # directory can go, it reports no OSC 7 (cmd), so the overlay is spawned in the dead dir.
-        $goneDir = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-gone-" + [guid]::NewGuid().ToString('N'))
+        $goneDir = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-gone-" + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $goneDir | Out-Null
         $goneMade = Invoke-Ctl @('session', 'new', '--name', 'p2-227-gone', '--cwd', $goneDir, '--command-mode', 'direct', '--command', 'cmd.exe /c cd /d C:\ & ping -n 60 127.0.0.1 >nul', '--no-select')
         $goneId = [string]$goneMade.result
@@ -859,7 +859,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
             try { Remove-Item -LiteralPath $goneDir -Recurse -Force -ErrorAction Stop; $goneRemoved = $true } catch { Start-Sleep -Milliseconds 200 }
         }
         Check 'fixture: the launch dir of the p2-227-gone session could be deleted' $goneRemoved "$goneDir"
-        $goneFile = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-block-gone-" + [guid]::NewGuid().ToString('N') + '.json')
+        $goneFile = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-block-gone-" + [guid]::NewGuid().ToString('N') + '.json')
         $goneProc = Start-Process $ctl -ArgumentList @('session', 'overlay', 'open', '"cmd /c exit 0"', '--block', '--target', $goneId, '--pipe', $pipe, '--json') -NoNewWindow -PassThru -RedirectStandardOutput $goneFile
         $goneEnded = $goneProc.WaitForExit(15000)
         if (-not $goneEnded) { try { $goneProc.Kill() } catch { } }
@@ -982,7 +982,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         Check 'and the clipboard is unchanged (copy is a read: its sequence number did not move)' ($p5Seq -eq $p5SeqAfter) "sequence before=$p5Seq after=$p5SeqAfter"
         $p5UnderCopy = Invoke-Ctl @('session', 'copy', '--target', $p5Right)
         Check 'session copy --target <right pane> keeps reading the pane underneath (nothing selected there)' ($p5UnderCopy.ok -and "$($p5UnderCopy.result)" -eq '') "$($p5UnderCopy | ConvertTo-Json -Compress)"
-        # P6: `session paste` with NO text pastes the clipboard (agwintermctl always sends text, "" when
+        # P6: `session paste` with NO text pastes the clipboard (wagtermctl always sends text, "" when
         # none was given, so the documented fallback never ran before #256). The clipboard is the user's,
         # shared with every window on this machine, so the case goes through the clipboard guard
         # (clipboard-guard.ps1, whose header names every state used below): EVERY format's bytes are
@@ -1078,7 +1078,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         # Codex (round 8): a PASS drops the Check's detail, so the runner's format count was never seen;
         # a plain line records it (ids, names, lengths — never contents).
         if ($p6Snap -and -not $p6Snap.Unsupported) { "  clipboard before the paste case: $(@($p6Snap.Formats).Count) format(s): $($p6Snap.Names)" }
-        $p6File = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-" + [guid]::NewGuid().ToString('N') + '.bin')
+        $p6File = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-" + [guid]::NewGuid().ToString('N') + '.bin')
         if (-not $p6Why) { try { $p6Snap.Save($p6File) } catch { $p6Why = "the clipboard could not be saved to $p6File`: $($_.Exception.Message)" } }
         $p6Sentinel = 'agw-paste-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
         $p6Paste = $null; $p6Seen = $false; $p6Text = ''; $p6Write = $null; $p6Restore = $null
@@ -1179,7 +1179,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
             if ($ehHoldSeen) {
                 $ehHwnd = $process.MainWindowHandle
                 if ($ehHwnd -ne [IntPtr]::Zero) {
-                    [Agwinterm.Win32ControlTest.NativeMethods]::PostReturn($ehHwnd)
+                    [Wagterm.Win32ControlTest.NativeMethods]::PostReturn($ehHwnd)
                     for ($i = 0; $i -lt 20; $i++) {
                         if (-not (Get-SessionSnapshot $ehId)) { $ehGone = $true; break }
                         Start-Sleep -Milliseconds 200
@@ -1443,7 +1443,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         for ($i = 0; $i -lt 30 -and (Get-SessionSnapshot $reopenId); $i++) { Start-Sleep -Milliseconds 200 }
         $reopenGone = -not (Get-SessionSnapshot $reopenId)
         $process.Refresh()
-        [Agwinterm.Win32ControlTest.NativeMethods]::Chord($process.MainWindowHandle, 0x52, $true)   # Ctrl+Shift+R = reopen_session
+        [Wagterm.Win32ControlTest.NativeMethods]::Chord($process.MainWindowHandle, 0x52, $true)   # Ctrl+Shift+R = reopen_session
         $reopenNode = $null
         for ($i = 0; $i -lt 30; $i++) { $reopenNode = Get-SessionSnapshot $reopenId; if ($reopenNode) { break }; Start-Sleep -Milliseconds 200 }
         Check 'session reopen (Ctrl+Shift+R) brings the session back on its id with its context' `
@@ -1596,7 +1596,7 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
-namespace Agwinterm.ControlMouseFixture
+namespace Wagterm.ControlMouseFixture
 {
     public static class ConsoleMode
     {
@@ -1614,16 +1614,16 @@ namespace Agwinterm.ControlMouseFixture
 }
 "@
 
-$stdinHandle = [Agwinterm.ControlMouseFixture.ConsoleMode]::GetStdHandle(-10)
+$stdinHandle = [Wagterm.ControlMouseFixture.ConsoleMode]::GetStdHandle(-10)
 $stdinMode = [uint32]0
-if (-not [Agwinterm.ControlMouseFixture.ConsoleMode]::GetConsoleMode($stdinHandle, [ref]$stdinMode)) {
+if (-not [Wagterm.ControlMouseFixture.ConsoleMode]::GetConsoleMode($stdinHandle, [ref]$stdinMode)) {
     throw "GetConsoleMode failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
 }
 
 # Ask ConPTY for raw VT input so terminal mouse reports reach the fixture as
 # bytes. ReadKey() consumes console input records and silently ignores them.
 $stdinMode = ($stdinMode -bor 0x0200) -band (-bnot 0x0006)
-if (-not [Agwinterm.ControlMouseFixture.ConsoleMode]::SetConsoleMode($stdinHandle, $stdinMode)) {
+if (-not [Wagterm.ControlMouseFixture.ConsoleMode]::SetConsoleMode($stdinHandle, $stdinMode)) {
     throw "SetConsoleMode failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
 }
 
@@ -1706,8 +1706,8 @@ function Read-MouseReport([int]$terminator) {
             $esc = [char]27
             $enableCellMouse = Invoke-Ctl @(
                 'session', 'write', "$esc[?1000h$esc[?1006h", '--target', $mouseOverlayId)
-            $clientRect = [Agwinterm.Win32ControlTest.NativeMethods+RECT]::new()
-            $hasClientRect = [Agwinterm.Win32ControlTest.NativeMethods]::GetClientRect(
+            $clientRect = [Wagterm.Win32ControlTest.NativeMethods+RECT]::new()
+            $hasClientRect = [Wagterm.Win32ControlTest.NativeMethods]::GetClientRect(
                 $hwnd, [ref]$clientRect)
             $clickX = [int](($clientRect.Right - $clientRect.Left) / 2)
             $clickY = [int](($clientRect.Bottom - $clientRect.Top) / 2)

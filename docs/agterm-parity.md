@@ -1,12 +1,16 @@
 # agterm parity tracker
 
-What [umputun/agterm](https://github.com/umputun/agterm) has that **agwinterm** and **agliteterm** do
+Inherited upstream report. Product references use wagterm for feature orientation, but release versions,
+issue numbers and completed batches below describe agwinterm's history, not wagterm releases.
+agliteterm keeps its upstream integration identity and does not consume wagterm's renamed binaries.
+
+What [umputun/agterm](https://github.com/umputun/agterm) has that **wagterm** and **agliteterm** do
 not, and what we have closed.
 
 - Compared against **agterm v0.26.0** (2026-09-02), releases 0.22.0 → 0.26.0.
 - **The running order lives in [plans/2026-09-03-parity-batches.md](plans/2026-09-03-parity-batches.md)** —
   this file is what is missing, that file is which batch builds it and when.
-- Ours: agwinterm **0.17.13** released (main is ahead), agliteterm **0.17.15** released.
+- Ours: wagterm **0.17.13** released (main is ahead), agliteterm **0.17.15** released.
 - Update this file in the PR that closes an item. A line that says "missing" long after it shipped
   is worse than no tracker.
 - **This supersedes the earlier gap docs in this directory** (`agterm-gap-analysis*.md`,
@@ -22,35 +26,35 @@ named as such rather than left to look like a backlog nobody is working on.
 
 | Item | agterm | Closed by |
 | --- | --- | --- |
-| `session.text --lines N` reaching scrollback | 0.25.0 | agwinterm #213 |
-| `session.type` refuses control bytes (NUL truncation) | 0.25.0 | agwinterm #213, lite #15 *(open)* |
-| An escape hatch that works: `--allow-control` | — | agwinterm #214 *(open)*, lite #15 *(open)* |
-| `session.overlay` stops widening a pane id to its session | — | agwinterm #213 |
+| `session.text --lines N` reaching scrollback | 0.25.0 | wagterm #213 |
+| `session.type` refuses control bytes (NUL truncation) | 0.25.0 | wagterm #213, lite #15 *(open)* |
+| An escape hatch that works: `--allow-control` | — | wagterm #214 *(open)*, lite #15 *(open)* |
+| `session.overlay` stops widening a pane id to its session | — | wagterm #213 |
 | `session.write` (display injection) in lite | — | lite #15 *(open)* |
-| Per-session split panes (lite matched agwinterm) | — | lite #13 |
+| Per-session split panes (lite matched wagterm) | — | lite #13 |
 | `session.new --workspace` in lite | — | lite #13 |
-| `surface.cursor` — the caret column | 0.24.0 | agwinterm #221 *(P1)*, lite: P8 |
-| `statusChangedAt` on the tree's session node | 0.25.0 | agwinterm #221 *(P1)*, lite: P8 |
-| `agwintermctl version` | 0.25.0 | agwinterm #221 *(P1)*, lite: P8 |
-| `--stdin` on `session type` / `session write`, rejecting invalid UTF-8 | 0.26.0 | agwinterm #226 *(P2)*, lite: P2-lite |
-| `session.overlay.open` / `resize` validate `--size-percent` as 1–100 | 0.26.0 | agwinterm #226 *(P2)*, lite: P2-lite |
-| `session.restore` reports which pane received the content (+ `restoreCommands` in `tree`) | 0.26.0 | agwinterm #226 *(P2)* |
-| `sidebar.width` — the width in effect, out of range refused; unknown `sidebar` ops refused | 0.26.0 | agwinterm #226 *(P2)* |
-| `session.new` refuses an unknown workspace; a bare `session new` lands in the caller's workspace | — | agwinterm #226 *(P2)*, lite: P2-lite *(caller half)* |
-| `session.context` — one line per session, shown in the title bar, the row and the palette, in `tree` as `context`, restored after a restart | 0.26.0 | agwinterm #233 *(P3)*, lite: P3-lite |
-| `restore.capture` — fill the captured-command slots on demand, per-pane reply, `capturedCommands` in `tree` | 0.26.0 | agwinterm #233 *(P3)*, lite: P3-lite |
-| `session.split` replies with the **pane id** (the split pane's on `on`, also when already split; the survivor's on `off`) | — | agwinterm *(P4, #238)*; lite had it (#13) |
-| Horizontal splits — `--axis vertical\|horizontal` on `session.split` (agterm's words: vertical = left/right, horizontal = top/bottom), per session, re-orients live, survives restore, `axis` in `tree`; `session.focus` takes `primary\|split\|left\|right\|top\|bottom\|other`, `session.resize` gains `--grow-top` / `--grow-bottom` | 0.23.0 | agwinterm *(P4, #238)*, lite: P4-lite |
-| `session.split.close` — closes **either** pane, the survivor's id as the reply; a one-pane session refused | 0.23.0 | agwinterm *(P4, #238)*, lite: P4-lite |
-| `session.swap` — the panes exchanged; axis, ratio sequence, focus's pane, the session-wide overlay, status and **every id** kept (a pane overlay travels with its pane since P5) | 0.26.0 | agwinterm *(P4, #238)*, lite: P4-lite *(agliteterm #30 — one flag read in its hidden-session model; see [lite-parity.md](lite-parity.md))* |
-| Pane-scoped overlays and reading an overlay — `--pane left\|right` on `session.overlay` `open` / `close` / `result` (the flag omitted = the session-wide slot, unchanged byte for byte; `left` = pane 0 and `right` = pane 1 whatever the axis; a pane overlay is that pane's **surface** while open, moves with its pane on a swap and dies with it), `session.overlay.copy`, `session.overlay.text [--all\|--lines N]`, `session.text --all`, `paneOverlays` in `tree` | 0.24.0 (`copy` / `text`), pane scoping 2026-08-01 | agwinterm *(P5, #250)*, lite *(P5-lite, agliteterm #40)* |
-| `session.rename` replies `{session, name}` — the session the name landed on and the name in effect; a pane id names the session that pane belongs to, a blank name and an unknown target are refused in their own words | — | agwinterm #287, and agliteterm's mirror of it |
+| `surface.cursor` — the caret column | 0.24.0 | wagterm #221 *(P1)*, lite: P8 |
+| `statusChangedAt` on the tree's session node | 0.25.0 | wagterm #221 *(P1)*, lite: P8 |
+| `wagtermctl version` | 0.25.0 | wagterm #221 *(P1)*, lite: P8 |
+| `--stdin` on `session type` / `session write`, rejecting invalid UTF-8 | 0.26.0 | wagterm #226 *(P2)*, lite: P2-lite |
+| `session.overlay.open` / `resize` validate `--size-percent` as 1–100 | 0.26.0 | wagterm #226 *(P2)*, lite: P2-lite |
+| `session.restore` reports which pane received the content (+ `restoreCommands` in `tree`) | 0.26.0 | wagterm #226 *(P2)* |
+| `sidebar.width` — the width in effect, out of range refused; unknown `sidebar` ops refused | 0.26.0 | wagterm #226 *(P2)* |
+| `session.new` refuses an unknown workspace; a bare `session new` lands in the caller's workspace | — | wagterm #226 *(P2)*, lite: P2-lite *(caller half)* |
+| `session.context` — one line per session, shown in the title bar, the row and the palette, in `tree` as `context`, restored after a restart | 0.26.0 | wagterm #233 *(P3)*, lite: P3-lite |
+| `restore.capture` — fill the captured-command slots on demand, per-pane reply, `capturedCommands` in `tree` | 0.26.0 | wagterm #233 *(P3)*, lite: P3-lite |
+| `session.split` replies with the **pane id** (the split pane's on `on`, also when already split; the survivor's on `off`) | — | wagterm *(P4, #238)*; lite had it (#13) |
+| Horizontal splits — `--axis vertical\|horizontal` on `session.split` (agterm's words: vertical = left/right, horizontal = top/bottom), per session, re-orients live, survives restore, `axis` in `tree`; `session.focus` takes `primary\|split\|left\|right\|top\|bottom\|other`, `session.resize` gains `--grow-top` / `--grow-bottom` | 0.23.0 | wagterm *(P4, #238)*, lite: P4-lite |
+| `session.split.close` — closes **either** pane, the survivor's id as the reply; a one-pane session refused | 0.23.0 | wagterm *(P4, #238)*, lite: P4-lite |
+| `session.swap` — the panes exchanged; axis, ratio sequence, focus's pane, the session-wide overlay, status and **every id** kept (a pane overlay travels with its pane since P5) | 0.26.0 | wagterm *(P4, #238)*, lite: P4-lite *(agliteterm #30 — one flag read in its hidden-session model; see [lite-parity.md](lite-parity.md))* |
+| Pane-scoped overlays and reading an overlay — `--pane left\|right` on `session.overlay` `open` / `close` / `result` (the flag omitted = the session-wide slot, unchanged byte for byte; `left` = pane 0 and `right` = pane 1 whatever the axis; a pane overlay is that pane's **surface** while open, moves with its pane on a swap and dies with it), `session.overlay.copy`, `session.overlay.text [--all\|--lines N]`, `session.text --all`, `paneOverlays` in `tree` | 0.24.0 (`copy` / `text`), pane scoping 2026-08-01 | wagterm *(P5, #250)*, lite *(P5-lite, agliteterm #40)* |
+| `session.rename` replies `{session, name}` — the session the name landed on and the name in effect; a pane id names the session that pane belongs to, a blank name and an unknown target are refused in their own words | — | wagterm #287, and agliteterm's mirror of it |
 
 `session.rename`'s row is the third in the family P2 opened: `session.restore` stopped answering the
 constant "pinned" and named the pane, P3's `session.context` shipped `{session, context}`, and #287
 found `rename` still answering "renamed" for every outcome — so a caller that targeted a PANE could
 not see which session took the name. Widening to the owner is kept, deliberately and now visibly: a
-pane has no label of its own, and `AGWINTERM_SESSION_ID` IS a pane id, so refusing would refuse the
+pane has no label of its own, and `WAGTERM_SESSION_ID` IS a pane id, so refusing would refuse the
 verb's commonest call. That is the same rule the `session.overlay` note below records from the other
 side: a pane id is refused where the verb acts on a PANE and a `--pane` flag can name one, and lands
 on the session where the verb acts on a SESSION — what is never allowed is doing either one silently.
@@ -117,7 +121,7 @@ value validated (`plans/completed/2026-09-05-p3-persistence.md`); P4 is the seco
 with one additive key (`Axis`, written only for a split horizontal session, validated on load). `--stdin` is `session type` / `session write` here — `quick type` has
 no separate verb because the quick terminal is a pane with an id that `session type --target`
 reaches. The agliteterm mirrors are the per-batch `P<n>-lite` plans, tracked in
-[lite-parity.md](lite-parity.md) — agwinterm-first, so the contract is fixed before it is copied.
+[lite-parity.md](lite-parity.md) — wagterm-first, so the contract is fixed before it is copied.
 
 ---
 
@@ -125,20 +129,20 @@ reaches. The agliteterm mirrors are the per-batch `P<n>-lite` plans, tracked in
 
 Nothing left here: the control-API items closed with P1–P5. What remains of the overlay verbs is
 agterm's `--cwd`, `--follow` and `--background-color` on `open`, deliberately left out of P5
-(tracked as #139 / #88). P13 adds `session.hud` in agwinterm (see below).
+(tracked as #139 / #88). P13 adds `session.hud` in wagterm (see below).
 
 ---
 
 ## Open — UI
 
 ### 1. Native picker — P16
-`pick.open/result/cancel` and `agwintermctl pick` provide bounded native controls,
+`pick.open/result/cancel` and `wagtermctl pick` provide bounded native controls,
 label filtering, custom results, exact-ID waiting and window-owned lifetime.
 See [native-picker.md](native-picker.md). Lite mirror/conformance remain P17.
 
 ### 2. `session.hud` and `--position` — implemented in P13
 **agterm 0.22.0 / 0.24.0.** A transient overlay for status an agent wants seen without printing into
-the terminal, anchored to one of nine positions. Agwinterm now draws a passive native
+the terminal, anchored to one of nine positions. Wagterm now draws a passive native
 HUD with detail, spinners, colors and bounded width; it leaves terminal input and geometry
 unchanged. See [session-hud.md](session-hud.md) for targeting, replacement and validation.
 The agliteterm mirror remains owed in P17; the shared conformance floor is unchanged.
@@ -169,7 +173,7 @@ Mac attach over SSH. Requires zsh as the login shell and macOS.
 **We are partly there by a different route, and it is worth knowing where the line is.** Our pty-host
 outlives the UI by design, and lite *adopts* live shells on restart rather than relaunching them — so
 "quit the app, come back to running processes" already works here. What we do not have is surviving a
-**reboot**, or attaching to another machine's sessions. agwinterm's `restore-commands` re-runs a
+**reboot**, or attaching to another machine's sessions. wagterm's `restore-commands` re-runs a
 captured command line, which is a much weaker thing: the agent's conversation is gone, only the
 invocation comes back.
 
@@ -180,7 +184,7 @@ before assuming it applies, then decide.
 
 ### macOS-only
 Voice dictation and the accessibility tree (0.22.0), hardened-runtime and TCC entitlements, Apple
-notarisation. agwinterm has its own UIA path.
+notarisation. wagterm has its own UIA path.
 
 ---
 
@@ -191,11 +195,11 @@ shell `profiles`, `omp` theme control, `claude.adopt` / `claude.yolo` / `claude.
 `app.update`, `session.metrics` (live cell and pixel geometry) and `image.frameshm` (shared-memory
 frame delivery, which ConPTY makes necessary) — the last two on `main` since **#220**.
 
-## agliteterm, against agwinterm
+## agliteterm, against wagterm
 
 Tracked separately, in **[lite-parity.md](lite-parity.md)** — the goal there is that the two products
 expose the same features, so it is a list with an end, not a survey. Short version as of 2026-09-02:
-agliteterm answers **41 of agwinterm's 85** control verbs, the sharpest gap being `selection.*`
+agliteterm answers **41 of wagterm's 85** control verbs, the sharpest gap being `selection.*`
 (it can read a selection but not make one). It is also *ahead* in three places, which should move the
 other way.
 

@@ -1,10 +1,10 @@
 # Control API — the read-only trio
 
-`surface.cursor`, `statusChangedAt` and `agwintermctl version`. Three verbs that answer a question a
+`surface.cursor`, `statusChangedAt` and `wagtermctl version`. Three verbs that answer a question a
 caller previously had to guess at, so every case here checks the **number is right**, not merely
 well-shaped. A cursor column that is always `0`, a timestamp that is always "now", and a `version`
 that names the pipe it was told to use all pass a shape check while proving nothing — the unit tests
-in `tests/Agwinterm.Pty.Tests/` already pin the shapes.
+in `tests/Wagterm.Pty.Tests/` already pin the shapes.
 
 **The rule they all serve:** each reply describes the *live* thing it names — the caret where it
 actually rests, the moment the status was actually written, the binary that actually ran — so a
@@ -17,8 +17,8 @@ silently.
 
 ```powershell
 . tests\ui\lib.ps1
-$exe = Resolve-Binary $null 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
+$exe = Resolve-Binary $null 'wagterm.exe' 'Wagterm.Win32'
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
 $s   = Start-Sandbox -Exe $exe -Ctl $ctl -Pipe 'qa1'
 
 function Tree($s)     { (ConvertFrom-Json (Send-Ctl $s @('tree'))).result }
@@ -49,7 +49,7 @@ case.
    at the prompt, which is the state the caller actually asks about. Wait ~1s.
 3. Record `$c1 = Col $s (Sid $s)` and the pane text.
 4. Type `xyz` (again no newline), wait ~1s, record `$c2`.
-5. `[AgwUi]::Key($s.Hwnd, 8, 3)` — three Backspaces through the real key path.
+5. `[WagUi]::Key($s.Hwnd, 8, 3)` — three Backspaces through the real key path.
 6. Record `$c3`.
 
 **Expect:**
@@ -211,7 +211,7 @@ or the tie-break stops preferring the most recent.
 
 ## `version` names the binary that ran and the app it reached
 
-**Guards:** three `agwintermctl.exe` live on this machine — the install directory and two source
+**Guards:** three `wagtermctl.exe` live on this machine — the install directory and two source
 build trees — and none is on `PATH`. A QA run that drives a stale one reports green for a fix that is
 not in the binary under test. That has happened; `Resolve-Binary` exists because of it.
 
@@ -227,7 +227,7 @@ $code = $LASTEXITCODE
 - two lines, one starting `cli ` and one starting `app ` — greppable, in that order;
 - the `cli` line contains the **same path** as `$ctl`, compared case-insensitively after resolving
   both. Not merely "a path": the point of the line is which of the three ran;
-- the `app` line contains `\\.\pipe\qa1` — the sandbox's pipe, not the default `agwinterm` — and the
+- the `app` line contains `\\.\pipe\qa1` — the sandbox's pipe, not the default `wagterm` — and the
   version the app reports, which must match `Send-Ctl $s @('ping')`'s result;
 - `$code -eq 0`.
 
@@ -245,9 +245,9 @@ that was about to print it.
 **Steps:**
 
 ```powershell
-$out  = & $ctl version --pipe "agwinterm-qa-absent-$(New-Guid)" 2>&1 | Out-String
+$out  = & $ctl version --pipe "wagterm-qa-absent-$(New-Guid)" 2>&1 | Out-String
 $code = $LASTEXITCODE
-$j    = & $ctl version --pipe "agwinterm-qa-absent-$(New-Guid)" --json | ConvertFrom-Json
+$j    = & $ctl version --pipe "wagterm-qa-absent-$(New-Guid)" --json | ConvertFrom-Json
 ```
 
 Pick a pipe name nothing can be serving — a fresh GUID suffix, so a forgotten instance from an

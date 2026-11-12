@@ -1,12 +1,12 @@
-# Control-API conformance — the agwinterm side.
+# Control-API conformance — the wagterm side.
 #
-# agliteterm ships from its own repository promising to speak the agwintermctl dialect. THIS file is
+# agliteterm ships from its own repository promising to speak the wagtermctl dialect. THIS file is
 # the canonical copy of the contract and the runner; agliteterm's CI checks its copy against this
 # one and runs the same steps against its own client. So a verb removed or reshaped here fails the
 # other product's build, and vice versa — the promise is enforced by two CIs rather than asserted
 # in a README.
 #
-# Every verb in tests/conformance/control-api.json is driven through the REAL agwintermctl against
+# Every verb in tests/conformance/control-api.json is driven through the REAL wagtermctl against
 # a sandbox instance, and the response SHAPE is checked.
 #
 # Shape is the default; steps can also pin specific values and CLI exits.
@@ -45,28 +45,28 @@ function Resolve-Binary([string]$explicit, [string]$name, [string]$projectDir) {
         $roots += (Get-ChildItem $built -Recurse -Filter $name -ErrorAction SilentlyContinue |
                    Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName)
     }
-    $roots += "$env:LOCALAPPDATA\Programs\agwinterm\$name"
+    $roots += "$env:LOCALAPPDATA\Programs\wagterm\$name"
     foreach ($r in $roots) { if ($r -and (Test-Path $r)) { return $r } }
     return $null
 }
 
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
-$Exe = Resolve-Binary $Exe 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-if (-not $ctl) { "  SKIP  agwintermctl not found (set AGWINTERMCTL)"; exit ($Strict ? 1 : 0) }
-if (-not $Exe) { "  SKIP  agwinterm not found (pass -Exe)"; exit ($Strict ? 1 : 0) }
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
+$Exe = Resolve-Binary $Exe 'wagterm.exe' 'Wagterm.Win32'
+if (-not $ctl) { "  SKIP  wagtermctl not found (set WAGTERMCTL)"; exit ($Strict ? 1 : 0) }
+if (-not $Exe) { "  SKIP  wagterm not found (pass -Exe)"; exit ($Strict ? 1 : 0) }
 "  using: $(Split-Path $Exe -Leaf) from $(Split-Path $Exe -Parent)"
 
 # NOT back into $Spec: that parameter is typed [string], and PowerShell is case-insensitive, so
 # assigning the parsed object to $spec would silently ConvertTo-String it — $contract.steps then reads
 # as $null and the whole run "passes" having checked nothing. Which it did, once.
-# agwintermctl defaults its target to $AGWINTERM_SESSION_ID when none is given — which is the whole
+# wagtermctl defaults its target to $WAGTERM_SESSION_ID when none is given — which is the whole
 # point of that variable, and a trap here: this runner is itself launched from a terminal session,
 # so an untargeted verb would aim at the DEVELOPER's session id, which the sandbox instance has
 # never heard of ("session not found"). CI would pass and a local run would fail, or worse.
-$env:AGWINTERM_SESSION_ID = $null
-$env:AGWINTERM_PANE_ID = $null
-$env:AGWINTERM_PIPE = $null
-$env:AGWINTERM_WINDOW_ID = $null
+$env:WAGTERM_SESSION_ID = $null
+$env:WAGTERM_PANE_ID = $null
+$env:WAGTERM_PIPE = $null
+$env:WAGTERM_WINDOW_ID = $null
 
 $contract = Get-Content $Spec -Raw | ConvertFrom-Json
 $pipe = 'conform'
@@ -83,7 +83,7 @@ function Expand-Args($argv) {
         $out += $s
     }
     # The comma is load-bearing: PowerShell unwraps a one-element array on return, and splatting a
-    # bare string spreads its CHARACTERS — @('ping') reached agwintermctl as "p i n g".
+    # bare string spreads its CHARACTERS — @('ping') reached wagtermctl as "p i n g".
     return ,[string[]]$out
 }
 
@@ -181,7 +181,7 @@ try {
     }
 
     # --- the env contract -----------------------------------------------------------------------
-    # The AGWINTERM_* variables are what the agent skill, the status hooks and agwintermctl-inside-a-
+    # The WAGTERM_* variables are what the agent skill, the status hooks and wagtermctl-inside-a-
     # session read. They are the reason the rename kept the old prefix, so they are part of the
     # contract rather than an implementation detail — and they are asked of the SHELL, not of the
     # app, because what matters is that the child process actually received them.

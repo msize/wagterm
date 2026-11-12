@@ -3,19 +3,6 @@
 version = 4
 
 [[package]]
-name = "agwinterm-core"
-version = "0.1.0"
-
-[[package]]
-name = "agwinterm-ptyhost"
-version = "0.1.0"
-dependencies = [
- "agwinterm-core",
- "prost",
- "windows-sys",
-]
-
-[[package]]
 name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -99,6 +86,19 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "wagterm-core"
+version = "0.1.0"
+
+[[package]]
+name = "wagterm-ptyhost"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "wagterm-core",
+ "windows-sys",
+]
 
 [[package]]
 name = "windows-sys"

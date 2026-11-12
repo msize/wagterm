@@ -1,6 +1,6 @@
-# test-kitty-keyboard.ps1 — interactively verify agwinterm's Kitty keyboard protocol.
+# test-kitty-keyboard.ps1 — interactively verify wagterm's Kitty keyboard protocol.
 #
-# Run this INSIDE an agwinterm session:  pwsh -File tools\test-kitty-keyboard.ps1
+# Run this INSIDE an wagterm session:  pwsh -File tools\test-kitty-keyboard.ps1
 # It enables the Kitty keyboard protocol, then prints the exact escape sequence the
 # terminal sends for each key you press. Press keys from the checklist below and compare.
 # Press  q  (plain, no modifiers) to quit.
@@ -19,7 +19,7 @@
 #   Up             -> \x1b[A     ; Ctrl+Up  -> \x1b[1;5A
 #   plain 'a'      -> a          (plain typing is untouched)
 #
-# Note: agwinterm's own keyboard shortcuts (the Ctrl+Shift+* chords) still take precedence over
+# Note: wagterm's own keyboard shortcuts (the Ctrl+Shift+* chords) still take precedence over
 # the app, matching Windows Terminal — so those won't reach the protocol.
 
 $ErrorActionPreference = 'Stop'

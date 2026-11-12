@@ -82,11 +82,11 @@
 # shell would run its old C# under the new source with no warning. Revision below is bumped with every
 # change to the C#, and a loaded type that does not carry it stops the run.
 $clipboardGuardRevision = 6
-if (('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type]) -and
-    ('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision -ne $clipboardGuardRevision) {
-    throw "a ClipboardGuard type from an older run of this file is loaded in this shell (revision $(('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision), source $clipboardGuardRevision); run it from a fresh pwsh"
+if (('Wagterm.Win32ControlTest.ClipboardGuard' -as [type]) -and
+    ('Wagterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision -ne $clipboardGuardRevision) {
+    throw "a ClipboardGuard type from an older run of this file is loaded in this shell (revision $(('Wagterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision), source $clipboardGuardRevision); run it from a fresh pwsh"
 }
-if (-not ('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type])) {
+if (-not ('Wagterm.Win32ControlTest.ClipboardGuard' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -95,7 +95,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-namespace Agwinterm.Win32ControlTest
+namespace Wagterm.Win32ControlTest
 {
     /// <summary>The five calls the guard makes on a clipboard. Native below; a fake in the tests.
     /// Data flows as byte arrays: the api owns the handles.</summary>
@@ -238,7 +238,7 @@ namespace Agwinterm.Win32ControlTest
                 Marshal.Copy(input, 0, blobIn.pbData, input.Length);
                 DATA_BLOB blobOut;
                 bool ok = protect
-                    ? CryptProtectData(ref blobIn, "agwinterm clipboard snapshot", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out blobOut)
+                    ? CryptProtectData(ref blobIn, "wagterm clipboard snapshot", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out blobOut)
                     : CryptUnprotectData(ref blobIn, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, CRYPTPROTECT_UI_FORBIDDEN, out blobOut);
                 if (!ok) throw new InvalidOperationException((protect ? "CryptProtectData" : "CryptUnprotectData") + " failed: " + Marshal.GetLastWin32Error());
                 try
@@ -628,7 +628,7 @@ namespace Agwinterm.Win32ControlTest
 function Invoke-ClipboardRestore($snap, $write, [string]$file) {
     $result = $null
     for ($i = 0; $i -lt 5; $i++) {
-        $result = [Agwinterm.Win32ControlTest.ClipboardGuard]::Restore($snap, $write)
+        $result = [Wagterm.Win32ControlTest.ClipboardGuard]::Restore($snap, $write)
         if ($result.State -ne 'unopened') { break }
         Start-Sleep -Milliseconds 200
     }
@@ -640,9 +640,9 @@ function Invoke-ClipboardRestore($snap, $write, [string]$file) {
 # Recovery for a run that printed CLIPBOARD NOT RESTORED: the file's snapshot goes back whatever the
 # clipboard holds now, proven by a read-back; the file is deleted only then.
 function Restore-ClipboardFile([string]$file) {
-    $snap = [Agwinterm.Win32ControlTest.ClipboardSnapshot]::Load($file)
+    $snap = [Wagterm.Win32ControlTest.ClipboardSnapshot]::Load($file)
     Write-Host "restoring $($snap.Names) from $file"
-    $result = [Agwinterm.Win32ControlTest.ClipboardGuard]::Force($snap)
+    $result = [Wagterm.Win32ControlTest.ClipboardGuard]::Force($snap)
     if ($result.State -eq 'restored') { Remove-Item -LiteralPath $file -Force; Write-Host "restored; $file deleted" }
     else { Write-Host "NOT restored ($result); $file kept" }
     $result   # the only object on the pipeline: a caller assigning the call sees the state, the user the lines

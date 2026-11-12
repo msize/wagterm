@@ -1,4 +1,4 @@
-# AGWin Bitmap — build-time raster font packs for agwinterm-lite
+# AGWin Bitmap — build-time raster font packs for wagterm-lite
 
 Lite targets slow/old machines; the goal is text rendering with **no runtime vector
 rasterization**. These packs pre-rasterize a pinned Nerd Font into compact binary
@@ -113,7 +113,7 @@ Validation runs inside the generator: sorted/unique index, required coverage
 (box, blocks, Powerline, Cyrillic, U+FFFD), cell-width metadata, and for the
 Complete family spot checks that CJK/kana/hangul are wide 1-bit fallback glyphs.
 The **committed** packs are additionally validated on every CI run
-(`tests/Agwinterm.Core.Tests/AgbfPackTests.cs`: header sanity, CRC-32, sorted
+(`tests/Wagterm.Core.Tests/AgbfPackTests.cs`: header sanity, CRC-32, sorted
 index, atlas bounds, per-family coverage) — a corrupted regeneration can't ship.
 
 ## Runtime (agliteterm)
@@ -130,7 +130,7 @@ digits) instead of empty boxes.
 
 ## Performance
 
-`agwinterm-lite.exe --bench-agbf` prints the pack benchmarks (headless, no window).
+`wagterm-lite.exe --bench-agbf` prints the pack benchmarks (headless, no window).
 Measured on the dev machine, release build, cold loads with CRC validation, 1M
 random glyph lookups, 100 full 120×40 grid composes of mixed ASCII/box/CJK:
 

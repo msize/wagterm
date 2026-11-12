@@ -1,0 +1,29 @@
+[package]
+name = "wagterm-ptyhost"
+version = "0.1.0"
+edition = "2024"
+description = "wagterm pty-host in Rust: owns ConPTY sessions behind the newline-JSON pipe protocol (drop-in for the C# host; the same PtyHostClient drives both)"
+license = "MIT"
+
+[[bin]]
+name = "wagterm-ptyhost"
+path = "src/main.rs"
+
+[dependencies]
+wagterm-core = { path = "../wagterm-core" }
+prost = "0.13"
+
+[dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+]

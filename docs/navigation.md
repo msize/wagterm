@@ -1,6 +1,6 @@
 # Workspace navigation and small UI controls
 
-`agwintermctl workspace go next|prev` (or `--to next|prev`, alias `previous`)
+`wagtermctl workspace go next|prev` (or `--to next|prev`, alias `previous`)
 returns the destination workspace ID. It wraps in visible sidebar order, including
 collapsed workspaces. Flagged mode and fewer than two visible workspaces refuse.
 `--window ID|active` selects the library window; quick windows and `--target` refuse.
@@ -9,7 +9,7 @@ A destination with sessions selects its first session. An empty destination beco
 the current workspace without creating or closing a shell; the previously selected
 terminal remains visible. `tree` and `window state` report that current workspace.
 Subsequent `session new` uses it only when neither an explicit workspace nor a valid
-caller pane supplies a workspace (the CLI sends its `AGWINTERM_SESSION_ID`). Selecting
+caller pane supplies a workspace (the CLI sends its `WAGTERM_SESSION_ID`). Selecting
 a session clears this transient empty-workspace target. It is not restore state.
 Delete-current actions use the current workspace, not the still-selected terminal's
 workspace. Terminal input (including broadcast) continues to follow that visible

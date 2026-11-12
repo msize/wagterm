@@ -11,10 +11,10 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
     if ($ok) { "  PASS  $name" }
     else { $script:fail++; "  FAIL  $name$(if ($detail) { " — $detail" })" }
 }
-$guard = [Agwinterm.Win32ControlTest.ClipboardGuard]
+$guard = [Wagterm.Win32ControlTest.ClipboardGuard]
 $U = [Text.Encoding]::Unicode
 function New-Fake {
-    $fake = [Agwinterm.Win32ControlTest.FakeClipboardApi]::new()
+    $fake = [Wagterm.Win32ControlTest.FakeClipboardApi]::new()
     # A text clipboard as Windows synthesizes it: CF_UNICODETEXT with CF_LOCALE, CF_TEXT, CF_OEMTEXT.
     $fake.Store[13] = $U.GetBytes("hello`0"); $fake.Store[16] = [byte[]](9, 4, 0, 0)
     $fake.Store[1] = [Text.Encoding]::ASCII.GetBytes("hello`0"); $fake.Store[7] = [Text.Encoding]::ASCII.GetBytes("hello`0")
@@ -83,7 +83,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $w = $guard::WriteSentinel('agw-paste-5', $snap)
-    $file = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.SetFailures = 100
     $opens = $f.Opens
@@ -91,7 +91,7 @@ try {
     Check 'every Set fails after the empty → mutated (not changed), one transaction, the file kept' ($r.State -eq 'mutated' -and $f.Opens -eq $opens + 1 -and (Test-Path -LiteralPath $file)) "$r opens=$($f.Opens - $opens)"
     $f2 = New-Fake
     $snap2 = $guard::Take(); $w2 = $guard::WriteSentinel('agw-paste-5b', $snap2)
-    $file2 = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $file2 = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap2.Save($file2)
     $f2.UserWrites(13, $U.GetBytes("theirs`0"))
     $r2 = Invoke-ClipboardRestore $snap2 $w2 $file2
@@ -159,7 +159,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $w = $guard::WriteSentinel('agw-paste-9b', $snap)
-    $file = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.OpenFails = $true
     $sets = $f.Sets
@@ -177,7 +177,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $w = $guard::WriteSentinel('agw-paste-10', $snap)
-    $file = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.Seq++; $f.GetFails = 13
     $sets = $f.Sets; $empties = $f.Empties
@@ -285,26 +285,26 @@ try {
     $f.Store[0xC0F3] = [Text.Encoding]::ASCII.GetBytes('Version:0.9')
     $snap = $guard::Take()
     Check 'a registered format (id >= 0xC000) is carried by its id' ((-not $snap.Unsupported) -and ($snap.Formats -contains 0xC0F3)) "names=$($snap.Names)"
-    Check 'a stale ClipboardGuard type is refused: the source revision is the loaded one' (('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision -eq $clipboardGuardRevision) "loaded=$(('Agwinterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision) source=$clipboardGuardRevision"
+    Check 'a stale ClipboardGuard type is refused: the source revision is the loaded one' (('Wagterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision -eq $clipboardGuardRevision) "loaded=$(('Wagterm.Win32ControlTest.ClipboardGuard' -as [type])::Revision) source=$clipboardGuardRevision"
 
     # The DPAPI file: a round trip; the bytes on disk are not the clipboard's.
     $f = New-Fake
     $snap = $guard::Take()
-    $file = Join-Path ([IO.Path]::GetTempPath()) ("agwinterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
+    $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     try {
         $snap.Save($file)
         $disk = [IO.File]::ReadAllBytes($file)
         $plain = $U.GetBytes('hello')
         $found = $false
         for ($i = 0; $i -le $disk.Length - $plain.Length; $i++) { if ([Linq.Enumerable]::SequenceEqual([byte[]]$disk[$i..($i + $plain.Length - 1)], $plain)) { $found = $true; break } }
-        $back = [Agwinterm.Win32ControlTest.ClipboardSnapshot]::Load($file)
+        $back = [Wagterm.Win32ControlTest.ClipboardSnapshot]::Load($file)
         Check 'Save() then Load() round-trips every format; the file does not hold the text in the clear' ($snap.SameAs($back) -and -not $found) "names=$($back.Names) plaintext-found=$found"
         $threw = $false
         try { $snap.Save($file) } catch { $threw = $true }
         Check 'Save() refuses to overwrite an existing file' $threw
     } finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
 } finally {
-    $guard::Api = [Agwinterm.Win32ControlTest.NativeClipboardApi]::new()
+    $guard::Api = [Wagterm.Win32ControlTest.NativeClipboardApi]::new()
 }
 
 if ($fail) { "clipboard guard: $fail FAILED"; exit 1 }

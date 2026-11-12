@@ -23,10 +23,10 @@ height each.
 
 ```powershell
 . tests\ui\lib.ps1
-$exe = Resolve-Binary $null 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
+$exe = Resolve-Binary $null 'wagterm.exe' 'Wagterm.Win32'
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
 $s   = Start-Sandbox -Exe $exe -Ctl $ctl -Pipe 'qap'
-$out = Join-Path $env:TEMP 'agwinterm-qa-persistence'; New-Item -ItemType Directory -Force $out | Out-Null
+$out = Join-Path $env:TEMP 'wagterm-qa-persistence'; New-Item -ItemType Directory -Force $out | Out-Null
 $k   = Get-SandboxScale $s
 function Px([double]$dip) { [int]([Math]::Round($dip * $k)) }
 
@@ -124,7 +124,7 @@ draw.
   does not fit before the status dot;
 - `Compare-Capture row2-before row2-after` is **true**: the row for `below` is pixel-identical, at
   the same y. The row height did not change for the session that gained a context;
-- clicking the second row still selects it: `[AgwUi]::Click($s.Hwnd, 1, (Px 60), (Px (40 + 1.5*rowH/$k)))`
+- clicking the second row still selects it: `[WagUi]::Click($s.Hwnd, 1, (Px 60), (Px (40 + 1.5*rowH/$k)))`
   followed by `(Tree $s).workspaces[0].sessions | Where-Object active` naming `below` — the
   hit-test agrees with the pixels.
 
@@ -143,15 +143,15 @@ ellipsize. And a context nobody can *search* is a label, not a handle: an agent 
 No overlay open, palette closed.
 
 **Steps:**
-1. `[AgwUi]::Chord($s.Hwnd, 0x50, $false)` — Ctrl+P, the session palette. Wait ~0.8s.
+1. `[WagUi]::Chord($s.Hwnd, 0x50, $false)` — Ctrl+P, the session palette. Wait ~0.8s.
 2. **Harness note, not a product defect:** a posted Ctrl+P is translated by the sandbox's own
    message loop without the Ctrl the real key path carries, so a `p` lands in the query. Send one
-   Backspace first: `[AgwUi]::Key($s.Hwnd, 8, 1)`.
+   Backspace first: `[WagUi]::Key($s.Hwnd, 8, 1)`.
 3. `$p1 = Shot 'palette' @(0, 0, (Px 1100), (Px 700))`.
 4. Type the query only the context matches, one WM_CHAR per character:
-   `foreach ($ch in [char[]]'226') { [void][AgwUi]::PostMessageW($s.Hwnd, 0x0102, [IntPtr][int]$ch, [IntPtr]1); Start-Sleep -Milliseconds 40 }`;
+   `foreach ($ch in [char[]]'226') { [void][WagUi]::PostMessageW($s.Hwnd, 0x0102, [IntPtr][int]$ch, [IntPtr]1); Start-Sleep -Milliseconds 40 }`;
    wait ~0.8s; `$p2 = Shot 'palette-query' @(0, 0, (Px 1100), (Px 700))`.
-5. Escape: `[AgwUi]::Key($s.Hwnd, 27, 1)`.
+5. Escape: `[WagUi]::Key($s.Hwnd, 27, 1)`.
 
 **Expect:**
 - `palette.png`: the row for `$sid` has a dimmed second line reading
@@ -180,7 +180,7 @@ reads it back. Sidebar shown; `$r0 = Shot 'reopen-before' $Rows` with the row vi
 
 **Steps:**
 1. `Send-Ctl $s @('session','close',$id2)`; wait ~1.2s; confirm `Node $s $id2` is `$null`.
-2. `[AgwUi]::Chord($s.Hwnd, 0x52, $true)` — Ctrl+Shift+R. Wait ~2.5s.
+2. `[WagUi]::Chord($s.Hwnd, 0x52, $true)` — Ctrl+Shift+R. Wait ~2.5s.
 3. `$n = Node $s $id2`; `$r1 = Shot 'reopen-after' $Rows`.
 
 **Expect:**
@@ -202,7 +202,7 @@ Not a case here — a script, because it has to relaunch the app: `tests/integra
 After any of its cells the surfaces above can be captured again on the relaunched sandbox: the
 suffix is drawn from `Ses.Context`, which `TryRestoreState` fills through the same rules the verb
 uses, so a value the verb would refuse (a newline written into the file by hand) is dropped on load
-and **not** shown — `tests/Agwinterm.Pty.Tests/RestoreStateTests.cs` pins that.
+and **not** shown — `tests/Wagterm.Pty.Tests/RestoreStateTests.cs` pins that.
 
 **Cleanup:** `Stop-Sandbox $s`, always in a `finally`; the captures under `$out` are evidence, keep
 them with the run notes.

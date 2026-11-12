@@ -8,9 +8,9 @@
 
 syntax = "proto3";
 
-package agwinterm.persist;
+package wagterm.persist;
 
-option csharp_namespace = "Agwinterm.Core.Persist";
+option csharp_namespace = "Wagterm.Core.Persist";
 
 // One cell. Colours are 0x00RRGGBB; specs mirror ColorSpec (kind 0 default /
 // 1 indexed / 2 rgb). Fields are packed to keep the blob small: most cells are

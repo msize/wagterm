@@ -3,7 +3,7 @@
 #
 # Suite rules, and they are not negotiable:
 #   - ALWAYS a sandbox instance: --pipe <name> AND --app-id <name>. A %LOCALAPPDATA% override does
-#     NOT isolate agwinterm — .NET resolves LocalApplicationData through the known-folder API, so an
+#     NOT isolate wagterm — .NET resolves LocalApplicationData through the known-folder API, so an
 #     override is ignored and the app reads the real profile. --app-id is the seam that works.
 #     Getting this wrong means a check writes to the user's session list.
 #   - NEVER inject global input. No keybd_event, no SendInput. Everything is PostMessage to this
@@ -26,7 +26,7 @@ function Resolve-Binary([string]$explicit, [string]$name, [string]$projectDir) {
         $roots += (Get-ChildItem $built -Recurse -Filter $name -ErrorAction SilentlyContinue |
                    Sort-Object LastWriteTime -Descending | Select-Object -ExpandProperty FullName)
     }
-    $roots += "$env:LOCALAPPDATA\Programs\agwinterm\$name"
+    $roots += "$env:LOCALAPPDATA\Programs\wagterm\$name"
     foreach ($r in $roots) { if ($r -and (Test-Path $r)) { return $r } }
     return $null
 }
@@ -34,7 +34,7 @@ function Resolve-Binary([string]$explicit, [string]$name, [string]$projectDir) {
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-public static class AgwUi {
+public static class WagUi {
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int cx, int cy, uint f);
@@ -134,8 +134,8 @@ public static class AgwUi {
 .SYNOPSIS Is this app-id one Start-Sandbox minted — the only kind that may be relaunched WITHOUT --no-restore?
 Start-Sandbox mints "<pipe>-<8 hex>" and nothing else runs under such an id. Restart-Sandbox is the
 one place this suite lets the app READ a saved tree, and that is safe only when the tree is the
-sandbox's own: an app-id the product uses for itself ("agwinterm" is the release identity,
-"agwinterm-dev" a Debug build's) would restore the user's real session list and, on its next save,
+sandbox's own: an app-id the product uses for itself ("wagterm" is the release identity,
+"wagterm-dev" a Debug build's) would restore the user's real session list and, on its next save,
 write over it (qa/product.md, "Launching an isolated instance"; the 2026-07-29 wipe). So the check
 is positive — the minted shape, and the directory sitting directly under LocalApplicationData like
 every sandbox dir does — rather than a denylist of the ids known to be dangerous today.
@@ -159,7 +159,7 @@ function Start-SandboxProcess {
 
     # A check must never inherit the pane it is being RUN from, or `session type` lands in the
     # caller's own terminal instead of the sandbox.
-    foreach ($v in 'AGWINTERM_SESSION_ID', 'AGWINTERM_PANE_ID', 'AGWINTERM_PIPE') {
+    foreach ($v in 'WAGTERM_SESSION_ID', 'WAGTERM_PANE_ID', 'WAGTERM_PIPE') {
         Remove-Item "env:$v" -ErrorAction SilentlyContinue
     }
 
@@ -175,16 +175,16 @@ function Start-SandboxProcess {
     $S.Hwnd = $p.MainWindowHandle
     if ($S.Hwnd -ne [IntPtr]::Zero) {
         # A maximised window makes every coordinate in every check depend on the monitor.
-        if ([AgwUi]::IsZoomed($S.Hwnd)) { [void][AgwUi]::ShowWindow($S.Hwnd, 9); Start-Sleep 1 }
-        [void][AgwUi]::SetWindowPos($S.Hwnd, [IntPtr]::Zero, 150, 100, $S.Width, $S.Height, 0x0004)
+        if ([WagUi]::IsZoomed($S.Hwnd)) { [void][WagUi]::ShowWindow($S.Hwnd, 9); Start-Sleep 1 }
+        [void][WagUi]::SetWindowPos($S.Hwnd, [IntPtr]::Zero, 150, 100, $S.Width, $S.Height, 0x0004)
         Start-Sleep 2
     }
     return $up
 }
 
 <#
-.SYNOPSIS Launch an isolated agwinterm and wait until its control pipe answers.
-.PARAMETER Conf Lines for the instance's agwinterm.conf, e.g. "scrollback-lines = 0".
+.SYNOPSIS Launch an isolated wagterm and wait until its control pipe answers.
+.PARAMETER Conf Lines for the instance's wagterm.conf, e.g. "scrollback-lines = 0".
 .NOTES --no-restore suppresses only the RESTORE (Program.cs: `if (!_argNoRestore && TryRestoreState())`);
 SaveState has no such gate, so a sandbox launched this way still writes windows\<id>.json on every
 save. That is what lets Restart-Sandbox relaunch the same instance without the flag and have a tree
@@ -198,7 +198,7 @@ function Start-Sandbox {
     $appId  = "$Pipe-" + [Guid]::NewGuid().ToString('N').Substring(0, 8)
     $appDir = Join-Path $env:LOCALAPPDATA $appId
     New-Item -ItemType Directory -Force $appDir | Out-Null
-    if ($Conf.Count) { ($Conf -join "`n") | Set-Content (Join-Path $appDir 'agwinterm.conf') -Encoding UTF8 }
+    if ($Conf.Count) { ($Conf -join "`n") | Set-Content (Join-Path $appDir 'wagterm.conf') -Encoding UTF8 }
 
     $s = [pscustomobject]@{ Proc = $null; Exe = $Exe; Ctl = $Ctl; Pipe = $Pipe; AppId = $appId; AppDir = $appDir
                             Hwnd = [IntPtr]::Zero; Width = $Width; Height = $Height }
@@ -234,7 +234,7 @@ function Restart-Sandbox {
         $h = $S.Hwnd
         if ($h -eq [IntPtr]::Zero) { $p.Refresh(); $h = $p.MainWindowHandle }
         if ($h -eq [IntPtr]::Zero) { throw "Restart-Sandbox: no main window to close on pipe '$($S.Pipe)'" }
-        [void][AgwUi]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)   # WM_CLOSE
+        [void][WagUi]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)   # WM_CLOSE
         if (-not $p.WaitForExit($ExitTimeoutSec * 1000)) {
             throw "Restart-Sandbox: pid $($p.Id) did not exit within ${ExitTimeoutSec}s of WM_CLOSE; not killing it (that would make this a killed cell)"
         }
@@ -255,7 +255,7 @@ while the instance does. This rebuilds the handle object from the running proces
 #>
 function Connect-Sandbox {
     param([Parameter(Mandatory)][string]$Ctl, [Parameter(Mandatory)][string]$Pipe)
-    $proc = Get-CimInstance Win32_Process -Filter "Name = 'Agwinterm.Win32.exe'" |
+    $proc = Get-CimInstance Win32_Process -Filter "Name = 'wagterm.exe'" |
             Where-Object { $_.CommandLine -match "--pipe\s+$([regex]::Escape($Pipe))(\s|$)" } |
             Select-Object -First 1
     if (-not $proc) { throw "no sandbox instance is running on pipe '$Pipe'" }
@@ -278,11 +278,11 @@ function Stop-Sandbox {
 function Send-Ctl {
     param([Parameter(Mandatory)]$S, [Parameter(Mandatory)][string[]]$Argv)
     # EVERY call, not just at launch. A verb with no --target resolves the CALLER's session from
-    # these variables, and a QA run is itself started from inside an agwinterm pane: leave them set
+    # these variables, and a QA run is itself started from inside an wagterm pane: leave them set
     # and `session text` answers about a session the sandbox has never heard of (empty), while
     # `session type` is accepted and discarded. Nothing errors, and a whole suite goes green having
     # driven nothing at all.
-    foreach ($v in 'AGWINTERM_SESSION_ID', 'AGWINTERM_PANE_ID', 'AGWINTERM_PIPE') {
+    foreach ($v in 'WAGTERM_SESSION_ID', 'WAGTERM_PANE_ID', 'WAGTERM_PIPE') {
         Remove-Item "env:$v" -ErrorAction SilentlyContinue
     }
     (& $S.Ctl @Argv --pipe $S.Pipe --json 2>&1) -join ''
@@ -304,13 +304,13 @@ compare two of them byte for byte (Compare-Capture).
 function Save-SandboxCapture {
     param([Parameter(Mandatory)]$S, [Parameter(Mandatory)][string]$Path, [int[]]$Crop)
     Add-Type -AssemblyName System.Drawing
-    $r = New-Object AgwUi+RECT
-    [void][AgwUi]::GetWindowRect($S.Hwnd, [ref]$r)
+    $r = New-Object WagUi+RECT
+    [void][WagUi]::GetWindowRect($S.Hwnd, [ref]$r)
     $w = $r.R - $r.L; $h = $r.B - $r.T
     $bmp = New-Object System.Drawing.Bitmap $w, $h
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $dc = $g.GetHdc()
-    [void][AgwUi]::PrintWindow($S.Hwnd, $dc, 2)
+    [void][WagUi]::PrintWindow($S.Hwnd, $dc, 2)
     $g.ReleaseHdc($dc); $g.Dispose()
     if ($Crop -and $Crop.Count -eq 4) {
         # An origin at or past the edge would hand Bitmap.Clone a zero or negative width — refused
@@ -331,7 +331,7 @@ function Save-SandboxCapture {
 <#
 .SYNOPSIS The scale a DIP coordinate has to be multiplied by to land on this window's device pixels.
 #>
-function Get-SandboxScale { param([Parameter(Mandatory)]$S) [AgwUi]::GetDpiForWindow($S.Hwnd) / 96.0 }
+function Get-SandboxScale { param([Parameter(Mandatory)]$S) [WagUi]::GetDpiForWindow($S.Hwnd) / 96.0 }
 
 <#
 .SYNOPSIS Are two captures pixel-identical? The check for "this region did not move / did not change".

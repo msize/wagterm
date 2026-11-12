@@ -28,7 +28,7 @@ public static class QuickProbe {
     }
     public static IntPtr Find(uint pid) {
         IntPtr result=IntPtr.Zero;
-        EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid){var s=new StringBuilder(256);GetWindowTextW(h,s,256);if(s.ToString()=="agwinterm quick terminal"){result=h;return false;}}return true;},IntPtr.Zero);
+  EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid){var s=new StringBuilder(256);GetWindowTextW(h,s,256);if(s.ToString()=="WagTerm quick terminal"){result=h;return false;}}return true;},IntPtr.Zero);
         return result;
     }
     public static RECT WorkArea() { POINT p;GetCursorPos(out p);var m=new MON {size=Marshal.SizeOf<MON>()};if(!GetMonitorInfoW(MonitorFromPoint(p,2),ref m))throw new Exception("Monitor query");return m.work; }
@@ -106,7 +106,7 @@ $null=Rpc 'session.readonly' @{op='on'} -Window quick
 Check 'read-only quick refuses raw send command' (-not (Rpc 'command.run' @{name="echo forbidden>`"$blockedSink`"";mode='send'} -Window quick -AllowError).ok)
 Check 'read-only quick refuses named send command' (-not (Rpc 'command.run' @{name='QuickProbe'} -Window quick -AllowError).ok)
 $null=Rpc 'session.readonly' @{op='off'} -Window quick
-$null=Rpc 'command.run' @{name="echo {AGW_PANE}>`"$commandSink`"";mode='send'} -Window quick
+$null=Rpc 'command.run' @{name="echo {WAG_PANE}>`"$commandSink`"";mode='send'} -Window quick
 for($i=0;$i-lt 50 -and -not (Test-Path $commandSink);$i++){Start-Sleep -Milliseconds 100}
 Check 'surface-local send command retains quick context' ((Test-Path $commandSink) -and (Get-Content $commandSink -Raw).Trim()-eq 'quick')
 Check 'refused send wrote nothing before subsequent accepted command' ((Test-Path $commandSink) -and -not (Test-Path $blockedSink))
@@ -149,7 +149,7 @@ try {
     $probe=[QuickProbe]::RegisterHotKey([IntPtr]::Zero,0x615,0x4007,0x78)
     if($probe -and -not [QuickProbe]::UnregisterHotKey([IntPtr]::Zero,0x615)){$cleanup=$false;throw 'Cannot release unexpected old-chord probe'}
     Check 'old hotkey remains registered after replacement conflict' (-not $probe)
-    $configFile=Join-Path $appDir 'agwinterm.conf'
+    $configFile=Join-Path $appDir 'wagterm.conf'
     $beforeConfig=[IO.File]::ReadAllText($configFile)
     $locked=[IO.File]::Open($configFile,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
     try {

@@ -1,8 +1,8 @@
 # The control API
 
-agwinterm is scriptable through a local named pipe speaking newline-delimited JSON, with
-`agwintermctl` as the CLI wrapper. `agwintermctl --help` lists the core verbs and the agent skill
-(`agwintermctl install skill`) carries the full set; this page collects the
+wagterm is scriptable through a local named pipe speaking newline-delimited JSON, with
+`wagtermctl` as the CLI wrapper. `wagtermctl --help` lists the core verbs and the agent skill
+(`wagtermctl install skill`) carries the full set; this page collects the
 replies a script can rely on, and the ones that answer a question a script would otherwise have to
 guess at.
 
@@ -13,56 +13,56 @@ shares is canonical in [`tests/conformance/control-api.json`](../tests/conforman
 
 ## Reaching an instance
 
-Inside a session you get `AGWINTERM_SESSION_ID`, `AGWINTERM_WINDOW_ID` and `AGWINTERM_PIPE`, so a
-bare `agwintermctl` targets the instance and pane it runs in. `--pipe <name>` addresses another one
-(a Debug build is `agwinterm-dev`). Target defaults to `$AGWINTERM_SESSION_ID` when not given. Run
-`agwintermctl install skill` (or the palette entry) to teach Claude Code / Codex the full verb set.
+Inside a session you get `WAGTERM_SESSION_ID`, `WAGTERM_WINDOW_ID` and `WAGTERM_PIPE`, so a
+bare `wagtermctl` targets the instance and pane it runs in. `--pipe <name>` addresses another one
+(a Debug build is `wagterm-dev`). Target defaults to `$WAGTERM_SESSION_ID` when not given. Run
+`wagtermctl install skill` (or the palette entry) to teach Claude Code / Codex the full verb set.
 
-The CLI waits at most 30 s for the app's reply and then exits 1 with "no reply from agwinterm within
+The CLI waits at most 30 s for the app's reply and then exits 1 with "no reply from wagterm within
 30 s" (the request may still have been carried out). `--timeout <seconds>` changes the limit and
 `--timeout 0` removes it. `session overlay open --block` answers when its overlay closes, so it waits
-without a limit unless `--timeout` is given. A hook or script that runs `agwintermctl` under its own
+without a limit unless `--timeout` is given. A hook or script that runs `wagtermctl` under its own
 deadline should pass a shorter `--timeout`, so the CLI gives up before the runner abandons it.
 
 ## A tour
 
 ```powershell
-agwintermctl tree --json                     # workspace/session tree (+ splits, badges, overlays, paneOverlays)
-agwintermctl window state                    # sidebar/fullscreen/active read-back
-agwintermctl sidebar width 300               # move the divider; the reply is the width in effect
-agwintermctl session split on --axis horizontal   # stack the panes; the reply is the split pane's id
-agwintermctl session split close --target <pane>  # close EITHER pane; the reply is the survivor's id
-agwintermctl session swap                    # the two panes change places; every id stays where it was
-agwintermctl session status blocked --sound  # report agent status (a dot + bell in the UI)
-agwintermctl notify "build finished" --category ok  # green unread badge when the session is not in view
-agwintermctl session new --name build        # from a pane: lands in THAT pane's workspace, not the last-clicked one
-agwintermctl session new --name build --workspace-name CI --create-workspace
-agwintermctl session new --workspace no-such   # refused, no session: an unknown workspace is never swapped for the active one
-agwintermctl session type "npm test`n"       # type into the active session
+wagtermctl tree --json                     # workspace/session tree (+ splits, badges, overlays, paneOverlays)
+wagtermctl window state                    # sidebar/fullscreen/active read-back
+wagtermctl sidebar width 300               # move the divider; the reply is the width in effect
+wagtermctl session split on --axis horizontal   # stack the panes; the reply is the split pane's id
+wagtermctl session split close --target <pane>  # close EITHER pane; the reply is the survivor's id
+wagtermctl session swap                    # the two panes change places; every id stays where it was
+wagtermctl session status blocked --sound  # report agent status (a dot + bell in the UI)
+wagtermctl notify "build finished" --category ok  # green unread badge when the session is not in view
+wagtermctl session new --name build        # from a pane: lands in THAT pane's workspace, not the last-clicked one
+wagtermctl session new --name build --workspace-name CI --create-workspace
+wagtermctl session new --workspace no-such   # refused, no session: an unknown workspace is never swapped for the active one
+wagtermctl session type "npm test`n"       # type into the active session
 @"
 say "hi"
-"@ | agwintermctl session type --stdin   # text with quotes/newlines: stdin as bytes (see below)
-agwintermctl session overlay open "git diff" --size-percent 60
-agwintermctl session hud "Reviewing" --spinner --position top-right  # passive status, shell stays usable
-agwintermctl session hud update "Ready"                             # replace message in place
-agwintermctl session hud close
-agwintermctl session overlay open "lazygit" --pane right    # over the right pane only; the left pane stays live
-agwintermctl session overlay text --pane right --all        # the overlay's own screen + scrollback (session text reads the shell under it)
-agwintermctl session restore "npm run dev" --target <pane>   # re-run on every restart; reply names the pane
-agwintermctl restore capture                 # capture every pane's running command into its restore slot NOW, not only at quit
-agwintermctl session rename api              # the custom name in the sidebar and title bar
-agwintermctl session context "reviewing PR 226, left pane is the diff"   # one line of what the session is FOR; survives a restart
-agwintermctl session link https://github.com/acme/repo/pull/226   # the URL the session is about; Ctrl+Shift+L opens it
-agwintermctl dashboard build test deploy     # grid overview of chosen sessions
-agwintermctl theme set "Tokyo Night"         # retint the whole window
-agwintermctl window new --name scratchpad    # open a second window
-agwintermctl surface cursor --target <pane>  # the caret column of a pane, as a bare integer
-agwintermctl version                         # which CLI ran, and which app answered the pipe
+"@ | wagtermctl session type --stdin   # text with quotes/newlines: stdin as bytes (see below)
+wagtermctl session overlay open "git diff" --size-percent 60
+wagtermctl session hud "Reviewing" --spinner --position top-right  # passive status, shell stays usable
+wagtermctl session hud update "Ready"                             # replace message in place
+wagtermctl session hud close
+wagtermctl session overlay open "lazygit" --pane right    # over the right pane only; the left pane stays live
+wagtermctl session overlay text --pane right --all        # the overlay's own screen + scrollback (session text reads the shell under it)
+wagtermctl session restore "npm run dev" --target <pane>   # re-run on every restart; reply names the pane
+wagtermctl restore capture                 # capture every pane's running command into its restore slot NOW, not only at quit
+wagtermctl session rename api              # the custom name in the sidebar and title bar
+wagtermctl session context "reviewing PR 226, left pane is the diff"   # one line of what the session is FOR; survives a restart
+wagtermctl session link https://github.com/acme/repo/pull/226   # the URL the session is about; Ctrl+Shift+L opens it
+wagtermctl dashboard build test deploy     # grid overview of chosen sessions
+wagtermctl theme set "Tokyo Night"         # retint the whole window
+wagtermctl window new --name scratchpad    # open a second window
+wagtermctl surface cursor --target <pane>  # the caret column of a pane, as a bare integer
+wagtermctl version                         # which CLI ran, and which app answered the pipe
 ```
 
 ## Notification categories
 
-`agwintermctl notify "message" [--title "Title"] [--category ok|normal|attention]` sends a
+`wagtermctl notify "message" [--title "Title"] [--category ok|normal|attention]` sends a
 notification to a session. Raw control requests use `{"cmd":"notify","args":{"body":"message",
 "category":"ok"}}`. The category is optional: omitted notifications and OSC 9/777 notifications
 remain `attention` (red) for compatibility. Unknown values are refused without delivery. An older
@@ -73,7 +73,7 @@ The unread count remains the total number of messages. Its color reflects the hi
 unread category: `attention` red, then `normal` yellow, then `ok` green. Visiting the session or
 running `session seen` clears the count and category. A notification in the currently focused pane
 does not add an unread badge while the window is active. The agent-status circle is independent.
-The three badge colors can be changed in Settings → Notifications or with `agwintermctl config set
+The three badge colors can be changed in Settings → Notifications or with `wagtermctl config set
 notification-color-ok "#RRGGBB"` (likewise for `notification-color-normal` and
 `notification-color-attention`). This changes only presentation, not category priority or the count.
 
@@ -87,7 +87,7 @@ started), so back a match with `session text` of that row. It resolves its targe
 
 ## `session text --styles`
 
-`agwintermctl session text --styles [--all|--lines N] [--target ID]` reads text and its
+`wagtermctl session text --styles [--all|--lines N] [--target ID]` reads text and its
 rendering attributes. The wire request is `session.text` with `args.styles: true`.
 The CLI prints the result object below; adding `--json` keeps the usual `{ok,result}` envelope.
 Omitting `styles` or setting it to false keeps the existing plain string result unchanged.
@@ -144,7 +144,7 @@ the freshest of the two, so the session-level age cannot tell a dead hook from a
 ## `version`
 
 Prints two greppable lines: the `cli` that ran (version and its resolved path — several
-`agwintermctl.exe` can coexist off `PATH`) and the `app` that answered (version and pipe). It exits 0
+`wagtermctl.exe` can coexist off `PATH`) and the `app` that answered (version and pipe). It exits 0
 and still prints the `cli` line when nothing is listening, which is the case it exists for. `--json`
 gives the machine-readable form.
 
@@ -229,7 +229,7 @@ Replies `{action, pane, session}` instead of the word "pinned".
 `{"cmd":"session.bind","target":"<pane>","args":{"agent":"claude|codex|devin","resume":"<session id>","cwd":"<dir>","pid":<hook pid>}}`.
 Devin's event has no `cwd`, so its hook sends `DEVIN_PROJECT_DIR`, the project root Devin runs in.
 The reply `binding` means the report was well formed and the pane exists. The rest happens after it:
-agwinterm walks the process tree up from `pid` to the agent, refuses a run nested under another agent
+wagterm walks the process tree up from `pid` to the agent, refuses a run nested under another agent
 (a `claude -p`, `codex exec` or `devin -p` started from an agent's tool shell inherits the pane's id),
 refuses a `devin -p` run in the pane itself (and a Devin whose command line cannot be read), keeps the
 agent's permission and sandbox flags, and stores the resume line for the pane's shell. The hook waits
@@ -298,7 +298,7 @@ on the session node (absent when none).
   version first.
 - The reply `{session, link}` is the value **in effect** after the write. `--open` replies
   `{session, link, opened}` and is refused for a session without a link.
-- Custom commands get it as the `{AGW_LINK}` token and `$AGW_LINK` (empty when none).
+- Custom commands get it as the `{WAG_LINK}` token and `$WAG_LINK` (empty when none).
 
 ## `session split` and `session swap`
 
@@ -338,7 +338,7 @@ for with what it got.
 ## `session new` lands beside its caller
 
 `session new` with no `--workspace` creates the session **in the caller's own workspace**: the CLI
-sends the pane it runs in (its `AGWINTERM_SESSION_ID`), and the session goes next to it. Before, it
+sends the pane it runs in (its `WAGTERM_SESSION_ID`), and the session goes next to it. Before, it
 went to the *active* workspace, a global the UI moves on every click, so an agent creating several
 sessions scattered them wherever the user had last clicked. An agent gets sessions beside itself
 unless it says otherwise, and `--workspace` / `--workspace-name` are how it says otherwise.

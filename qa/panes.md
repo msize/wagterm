@@ -31,10 +31,10 @@ minus one pixel each side, so a rounding at another scale lands on gutter, never
 
 ```powershell
 . tests\ui\lib.ps1
-$exe = Resolve-Binary $null 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
+$exe = Resolve-Binary $null 'wagterm.exe' 'Wagterm.Win32'
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
 $s   = Start-Sandbox -Exe $exe -Ctl $ctl -Pipe 'qapn'
-$out = Join-Path $env:TEMP 'agwinterm-qa-panes'; New-Item -ItemType Directory -Force $out | Out-Null
+$out = Join-Path $env:TEMP 'wagterm-qa-panes'; New-Item -ItemType Directory -Force $out | Out-Null
 $k   = Get-SandboxScale $s
 function Px([double]$dip) { [int]([Math]::Round($dip * $k)) }
 function Tree($s)        { (ConvertFrom-Json (Send-Ctl $s @('tree'))).result }
@@ -155,7 +155,7 @@ into is the focused one — the inactive-pane dim would otherwise colour the str
 **Steps:**
 1. `$h0 = ($totalH - 6) * 0.5; $x = $X0 + [int]($TW/2); $y1 = Px (46 + $h0 + 3); $dy = 3 * [int]$m0.cellHeight`
    (three rows, in device pixels); `$rows0 = (Metrics $s $sid).rows`.
-2. `[AgwUi]::Drag($s.Hwnd, $x, $y1, $x, $y1 + $dy)`; wait ~1s; `$m = Metrics $s $sid; $n = Node $s $sid`.
+2. `[WagUi]::Drag($s.Hwnd, $x, $y1, $x, $y1 + $dy)`; wait ~1s; `$m = Metrics $s $sid; $n = Node $s $sid`.
 3. `$gOld = Shot 'drag-old' (HGutter 0.5)`;
    `$gNew = Shot 'drag-new' (HGutter ([double]$n.splitRatios[0]))`;
    `$ref = CropFile $single (HGutter ([double]$n.splitRatios[0])) (Join-Path $out 'single-at-new.png')`.
@@ -292,11 +292,11 @@ then `Reply $s @('keymap','reload')`.
    `$mo = Metrics $s $ovl; $mr = Metrics $s $pid1`.
 5. `$o2 = Reply $s @('session','overlay','open','cmd /c exit 0','--pane','right','--target',$sid)`.
 6. `Send-Ctl $s @('session','type','typed-into-overlay')`; wait ~1s; read `Text $s $ovl` and `Text $s $pid1`.
-7. `[AgwUi]::Key($s.Hwnd, 0x1B, 1)` (Esc, into the focused right pane); wait ~1s; `$nE = Node $s $sid`.
+7. `[WagUi]::Key($s.Hwnd, 0x1B, 1)` (Esc, into the focused right pane); wait ~1s; `$nE = Node $s $sid`.
 8. The `--wait` half, in the **unfocused** box: `Reply $s @('session','overlay','open','cmd /c exit 3','--pane','left','--wait','--target',$sid)`;
-   wait ~2s; `Shot 'pane-overlay-left-wait'`; `[AgwUi]::Key($s.Hwnd, 0x41, 1)` (`a`, into the focused
+   wait ~2s; `Shot 'pane-overlay-left-wait'`; `[WagUi]::Key($s.Hwnd, 0x41, 1)` (`a`, into the focused
    right pane); wait ~1s; `$nW = Node $s $sid`; then `Reply $s @('session','focus','left')`,
-   `[AgwUi]::Key($s.Hwnd, 0x41, 1)` again; wait; `$nW2 = Node $s $sid`.
+   `[WagUi]::Key($s.Hwnd, 0x41, 1)` again; wait; `$nW2 = Node $s $sid`.
 
 **Expect:**
 - 1: `ok:true`, `$ovl` starts with `"$pid1:overlay:"` — the owner is readable off the id — and
@@ -344,6 +344,6 @@ right pane.*
 - **The restart half** — the axis, the swapped order and the ids surviving a graceful close and a
   kill — is `tests/integration/restore-roundtrip.ps1` (`axis-graceful`, `axis-killed`, `swap-killed`).
 - **The reply shapes and refusals** of all four verbs are `tests/integration/win32-control.ps1` and
-  `tests/Agwinterm.Pty.Tests/SessionSplitTests.cs`.
+  `tests/Wagterm.Pty.Tests/SessionSplitTests.cs`.
 - **`session reopen` of a closed split session** brings back one pane — unchanged by P4 and
   documented in the plan; not a case here because there is nothing new to see.

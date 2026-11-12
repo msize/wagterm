@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Wagterm.Core/Wagterm.Core.csproj" />
+    <Project Path="src/Wagterm.Ctl/Wagterm.Ctl.csproj" />
+    <Project Path="src/Wagterm.Pty/Wagterm.Pty.csproj" />
+    <Project Path="src/Wagterm.Win32/Wagterm.Win32.csproj">
+      <Platform Project="x64" />
+    </Project>
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Wagterm.Core.Tests/Wagterm.Core.Tests.csproj" />
+    <Project Path="tests/Wagterm.Pty.Tests/Wagterm.Pty.Tests.csproj" />
+  </Folder>
+</Solution>

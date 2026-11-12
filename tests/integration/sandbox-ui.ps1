@@ -1,7 +1,7 @@
 #Requires -Version 7.0
 param(
-    [string]$Exe = "$PSScriptRoot/../../src/Agwinterm.Win32/bin/x64/Release/net10.0-windows/win-x64/Agwinterm.Win32.exe",
-    [string]$CtlExe = "$PSScriptRoot/../../src/Agwinterm.Ctl/bin/Release/net10.0-windows/agwintermctl.exe",
+    [string]$Exe = "$PSScriptRoot/../../src/Wagterm.Win32/bin/x64/Release/net10.0-windows/win-x64/wagterm.exe",
+    [string]$CtlExe = "$PSScriptRoot/../../src/Wagterm.Ctl/bin/Release/net10.0-windows/wagtermctl.exe",
     [ValidateSet('Hud','Quick','Navigation','Picker','Accessibility','Command','Menu')]
     [string]$Suite = 'Navigation',
     [string]$PowerShellHome = $PSHOME,
@@ -62,7 +62,7 @@ foreach ($source in $sources) {
     }
 }
 
-$mutex = [Threading.Mutex]::new($false, 'Local\agwinterm-sandbox-ui')
+$mutex = [Threading.Mutex]::new($false, 'Local\wagterm-sandbox-ui')
 $locked = $false
 try {
     if (-not $PrepareOnly) {
@@ -77,10 +77,10 @@ try {
     Write-Host "Preparing $Suite payload in $OutputDirectory"
     $null = New-Item -ItemType Directory -Path $payload, $results
     Copy-Directory (Split-Path $Exe) (Join-Path $payload 'app')
-    $ctlDirectory = Join-Path $payload 'src/Agwinterm.Ctl/bin/Release/net10.0-windows'
+    $ctlDirectory = Join-Path $payload 'src/Wagterm.Ctl/bin/Release/net10.0-windows'
     Copy-Directory (Split-Path $CtlExe) $ctlDirectory
-    if ((Split-Path $CtlExe -Leaf) -ne 'agwintermctl.exe') {
-        Copy-Item -LiteralPath $CtlExe -Destination (Join-Path $ctlDirectory 'agwintermctl.exe')
+    if ((Split-Path $CtlExe -Leaf) -ne 'wagtermctl.exe') {
+        Copy-Item -LiteralPath $CtlExe -Destination (Join-Path $ctlDirectory 'wagtermctl.exe')
     }
     Copy-Directory $PSScriptRoot (Join-Path $payload 'tests/integration')
     Copy-Directory $PowerShellHome (Join-Path $payload 'powershell')
@@ -108,10 +108,10 @@ try {
   <VideoInput>Disable</VideoInput>
   <PrinterRedirection>Disable</PrinterRedirection>
   <MappedFolders>
-    <MappedFolder><HostFolder>$inputXml</HostFolder><SandboxFolder>C:\AgwintermInput</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>
-    <MappedFolder><HostFolder>$resultsXml</HostFolder><SandboxFolder>C:\AgwintermResults</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
+    <MappedFolder><HostFolder>$inputXml</HostFolder><SandboxFolder>C:\WagtermInput</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>
+    <MappedFolder><HostFolder>$resultsXml</HostFolder><SandboxFolder>C:\WagtermResults</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
   </MappedFolders>
-  <LogonCommand><Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\AgwintermInput\tests\integration\sandbox-ui-guest.ps1</Command></LogonCommand>
+  <LogonCommand><Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\WagtermInput\tests\integration\sandbox-ui-guest.ps1</Command></LogonCommand>
 </Configuration>
 "@ | Set-Content -LiteralPath $configuration -Encoding utf8
     Write-Host "Sandbox configuration: $configuration"

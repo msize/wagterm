@@ -4,16 +4,16 @@ Status: **draft, layout version 1.** This page is the contract a producer codes 
 consuming project ships against it, a change to the header layout or the JSON args is a breaking
 change and must bump `version`.
 
-Related: [`image.frame`](../../src/Agwinterm.Pty/ControlServer.cs) (the file-based sibling this
+Related: [`image.frame`](../../src/Wagterm.Pty/ControlServer.cs) (the file-based sibling this
 verb mirrors), and the implementation of the layout in
-[`src/Agwinterm.Pty/ShmFrameLayout.cs`](../../src/Agwinterm.Pty/ShmFrameLayout.cs).
+[`src/Wagterm.Pty/ShmFrameLayout.cs`](../../src/Wagterm.Pty/ShmFrameLayout.cs).
 
 ## What it is for
 
 `image.frame` already does everything a frame path needs — content-signature caching, pixel reads
 off the render lock, a microsecond-scale locked placement swap. Its one problem is transport: every
 image arrives as a `path`, so a 30fps full-pane producer PNG-encodes and writes a file 30 times a
-second and agwinterm reads it back. `image.frameshm` keeps the placement machinery and replaces the
+second and wagterm reads it back. `image.frameshm` keeps the placement machinery and replaces the
 transport with a shared memory mapping carrying raw BGRA.
 
 The verb is an **optimisation with an automatic fallback**. A producer that cannot open a mapping,
@@ -59,10 +59,10 @@ must not exceed `slotStride`. The mapping must therefore be at least
 The name is passed in the JSON args and **must begin with the literal prefix**:
 
 ```
-Local\agwinterm-frame-
+Local\wagterm-frame-
 ```
 
-So a producer creates, for example, `Local\agwinterm-frame-browser-1`. The prefix is enforced by
+So a producer creates, for example, `Local\wagterm-frame-browser-1`. The prefix is enforced by
 the reader: it keeps a request from naming an arbitrary pre-existing kernel object, and the
 `Local\` namespace keeps the mapping inside the caller's session. A name outside the prefix is
 rejected with `{"ok":false,...}` — this is a validation error, not a bug, so use the prefix above
@@ -125,7 +125,7 @@ error condition for the terminal; they are all ordinary input from another proce
 
 | rejected when | why |
 |---|---|
-| `name` outside `Local\agwinterm-frame-` or using characters outside `[A-Za-z0-9._-]` | naming an arbitrary kernel object |
+| `name` outside `Local\wagterm-frame-` or using characters outside `[A-Za-z0-9._-]` | naming an arbitrary kernel object |
 | the mapping does not exist | the producer exited — expected, not exceptional |
 | view shorter than 256 bytes, bad `magic`, `version != 1`, `slotCount` outside 2..8 | not this layout |
 | `pixelOffset < 256`, non-positive `slotStride` | offsets that overlap the header or overflow |
@@ -182,7 +182,7 @@ the header gets a free consistency check; one that would rather not repeat itsel
     "images": [
       {
         "id": 1,
-        "name": "Local\\agwinterm-frame-browser-1",
+        "name": "Local\\wagterm-frame-browser-1",
         "slot": 1,
         "seq": 1,
         "width": 1920,
@@ -207,7 +207,7 @@ and range-checks/casts the remaining fields to `Int32` before putting them into 
 | field | meaning |
 |---|---|
 | `id` | image id, same semantics as `image.frame` — the key the terminal caches pixels under |
-| `name` | mapping/cache identity; `Local\agwinterm-frame-` prefix required, and a fresh suffix is required when `seq` resets |
+| `name` | mapping/cache identity; `Local\wagterm-frame-` prefix required, and a fresh suffix is required when `seq` resets |
 | `slot` | slot index to read, `0 <= slot < slotCount` |
 | `seq` | the non-negative signed 64-bit publish sequence; `0` means current/uncached, positive values drive the `(id, name, seq)` re-transmit cache |
 | `width`, `height`, `stride`, `format` | must agree with the slot descriptor; both are validated |
@@ -230,10 +230,10 @@ frame rather than a half-updated one.
 
 ## Driving it from the CLI
 
-`agwintermctl image frameshm` is the manual and scripting surface, a sibling of `image show`:
+`wagtermctl image frameshm` is the manual and scripting surface, a sibling of `image show`:
 
 ```powershell
-agwintermctl image frameshm Local\agwinterm-frame-browser-1 --slot 0 --seq 4 `
+wagtermctl image frameshm Local\wagterm-frame-browser-1 --slot 0 --seq 4 `
     --width 1920 --height 1080 --stride 7680 --format 132 --cols 120 --rows 30
 ```
 
@@ -247,7 +247,7 @@ rejected by `ControlServer`.
 The CLI rejects unknown options and contradictory input shapes before opening the pipe. In the
 single-entry form it also rejects non-numeric values other than the option parser's `"true"` sentinel,
 values outside the JSON field's `Int32`/`Int64` type, and mapping names outside the
-`Local\agwinterm-frame-` prefix. A numeric flag without a following value is represented by that
+`Local\wagterm-frame-` prefix. A numeric flag without a following value is represented by that
 sentinel and omitted; because the parser cannot distinguish it from an explicit spelling such as
 `--slot true`, that spelling is omitted too. In the multi-entry form the CLI checks that `--images` is
 a JSON array and rejects the positional name or any single-entry numeric flag beside it. Semantic
@@ -257,8 +257,8 @@ the reply.
 For the multi-entry, all-or-nothing case there is no flag shape, so pass the array directly:
 
 ```
-agwintermctl image frameshm --images '[{"name":"Local\\agwinterm-frame-a","slot":0,"seq":4},
-                                       {"name":"Local\\agwinterm-frame-b","slot":1,"seq":3}]'
+wagtermctl image frameshm --images '[{"name":"Local\\wagterm-frame-a","slot":0,"seq":4},
+                                       {"name":"Local\\wagterm-frame-b","slot":1,"seq":3}]'
 ```
 
 `--images` is forwarded as the request array and is mutually exclusive with the positional name and
@@ -267,7 +267,7 @@ the single-entry numeric flags. Global routing options such as `--target` and `-
 ## Sizing a pane with `session.metrics`
 
 A producer should size its viewport and frame from the pane's live cell metrics instead of guessing
-a font-dependent cell size. Send the pane id from `AGWINTERM_SESSION_ID` as the target:
+a font-dependent cell size. Send the pane id from `WAGTERM_SESSION_ID` as the target:
 
 ```json
 {"cmd":"session.metrics","target":"<pane id>"}
@@ -300,11 +300,11 @@ reports `unknown command 'session.metrics'`; a client may latch that capability 
 The Win32 host measures on every request from the target pane's current font size, layout and DPI.
 It uses the same per-pane `Metrics(pane.FontSize)` values as rendering and regridding, so a font-size
 change or pane resize is reflected in the next reply rather than waiting for a new session. The
-control-pipe surface is implemented in the live `Agwinterm.Win32` project; the similarly named
-`Agwinterm.App/MainWindow.xaml.cs` is not part of `Agwinterm.slnx` and is not an implementation.
+control-pipe surface is implemented in the live `Wagterm.Win32` project; the similarly named
+`Wagterm.App/MainWindow.xaml.cs` is not part of `Wagterm.slnx` and is not an implementation.
 
 For manual inspection, the ctl exposes the same call as
-`agwintermctl session metrics [<pane-id>] --json`. winterm-browser consumes the JSON form in
+`wagtermctl session metrics [<pane-id>] --json`. winterm-browser consumes the JSON form in
 `pixel-core`'s `ControlClient::pane_metrics`.
 
 ## Format
@@ -312,12 +312,12 @@ For manual inspection, the ctl exposes the same call as
 BGRA end to end (`KittyFormat.Bgra = 132`). Chromium's `paint` hands out BGRA and Direct2D wants
 `B8G8R8A8_UNORM`, so a swizzle at either end would be pure loss. `132` sits outside the Kitty wire
 range (24/32/100), and both APC parsers clamp `f=` to that range
-(`KittyFormats.ParseWireFormat`, and `parse_wire_format` in `native/agwinterm-core/src/emulator.rs`),
+(`KittyFormats.ParseWireFormat`, and `parse_wire_format` in `native/wagterm-core/src/emulator.rs`),
 so the value can never be produced by parsing a real graphics sequence — only a host path such as
 this verb can mint it.
 
 **Alpha is straight, not premultiplied.** Byte order within a pixel is `B, G, R, A`, and the colour
-channels are *not* scaled by alpha; agwinterm premultiplies during upload, exactly as it does for
+channels are *not* scaled by alpha; wagterm premultiplies during upload, exactly as it does for
 `KittyFormat.Rgba`. A producer with no transparency writes `A = 255` and need not think about it.
 
 ## Why copy at all
@@ -329,7 +329,7 @@ separate, later work.
 
 ## Measured throughput
 
-Measured 2026-08-27 against a live dev instance (a Debug build under instance id `agwinterm-dev`),
+Measured 2026-08-27 against a live dev instance (a Debug build under instance id `wagterm-dev`),
 on a Ryzen 9 7940HS / Windows 11. The producer was a PowerShell script holding one persistent
 control-pipe connection, writing a full-pane **1920×1080 BGRA** frame into the mapping and
 serialising on each reply — the obligation stated above, so never more than one frame outstanding

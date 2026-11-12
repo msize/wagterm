@@ -1,6 +1,6 @@
 # Third-party fonts
 
-Every font bundled with agwinterm or agliteterm, or rasterized into generated assets, with exact
+Every font bundled with wagterm or agliteterm, or rasterized into generated assets, with exact
 versions and licenses. License texts ship next to the font files — `assets/fonts/` here, `assets/`
 in [agliteterm](https://github.com/yeroo/agliteterm) — and inside the installers.
 
@@ -22,4 +22,4 @@ Notes:
   Logos, Pomicons); licensing/attribution per set is documented in the pinned Nerd
   Fonts release. The AGWin Bitmap packs inherit those obligations.
 - SIL OFL 1.1 permits redistribution and format conversion (including
-  rasterization) provided the fonts are not sold standalone; agwinterm complies.
+  rasterization) provided the fonts are not sold standalone; wagterm complies.

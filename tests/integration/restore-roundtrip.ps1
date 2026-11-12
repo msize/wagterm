@@ -13,7 +13,7 @@
 #              `restore capture` wrote; relaunch; same assertions
 #   refusal    a refused context (control character, over-length) and a refused capture target
 #              before a graceful restart: the OLD value comes back and no slot was touched
-#   replay     restore-commands = true in the sandbox's own agwinterm.conf, killed: after the
+#   replay     restore-commands = true in the sandbox's own wagterm.conf, killed: after the
 #              relaunch the captured command is typed back into the pane (`session text` shows it
 #              with the `& ` prefix the replay adds, which the original typed line never had)
 #   quit-capture  restore-commands = true, a child running, NO `restore capture` for its pane, WM_CLOSE:
@@ -55,7 +55,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# agwintermctl exits nonzero while a pipe is coming up, and the ping loop in the harness polls it on
+# wagtermctl exits nonzero while a pipe is coming up, and the ping loop in the harness polls it on
 # purpose; with the native-command mapping on, that poll would throw on its first iteration.
 $PSNativeCommandUseErrorActionPreference = $false
 . "$PSScriptRoot\..\ui\lib.ps1"
@@ -67,14 +67,14 @@ function Check([string]$name, [bool]$ok, [string]$detail = '') {
 }
 
 "== restore round-trip =="
-$ctl = Resolve-Binary $env:AGWINTERMCTL 'agwintermctl.exe' 'Agwinterm.Ctl'
-$exe = Resolve-Binary $Exe 'Agwinterm.Win32.exe' 'Agwinterm.Win32'
-if (-not $ctl) { "  SKIP  agwintermctl not found (set AGWINTERMCTL)"; exit ($Strict ? 1 : 0) }
-if (-not $exe) { "  SKIP  agwinterm build not found (build src\Agwinterm.Win32 or pass -Exe)"; exit ($Strict ? 1 : 0) }
+$ctl = Resolve-Binary $env:WAGTERMCTL 'wagtermctl.exe' 'Wagterm.Ctl'
+$exe = Resolve-Binary $Exe 'wagterm.exe' 'Wagterm.Win32'
+if (-not $ctl) { "  SKIP  wagtermctl not found (set WAGTERMCTL)"; exit ($Strict ? 1 : 0) }
+if (-not $exe) { "  SKIP  wagterm build not found (build src\Wagterm.Win32 or pass -Exe)"; exit ($Strict ? 1 : 0) }
 if ($exe -like "$env:LOCALAPPDATA\Programs\*") {
     # Resolve-Binary in lib.ps1 falls back to the installed app; a restore cell must run a build from
     # this tree, or a pre-P3 app "fails" every cell for a reason that has nothing to do with the code.
-    "  SKIP  only an installed agwinterm was found; build src\Agwinterm.Win32 or pass -Exe"; exit ($Strict ? 1 : 0)
+    "  SKIP  only an installed wagterm was found; build src\Wagterm.Win32 or pass -Exe"; exit ($Strict ? 1 : 0)
 }
 "  using: $exe"
 "  ctl:   $ctl"
@@ -239,7 +239,7 @@ Cell -Name 'refusal' -Setup {
 }
 
 # restore-commands is a config key (TerminalConfig.cs: `restore-commands = false` by default), and the
-# sandbox has its own agwinterm.conf, so the replay half is checkable here rather than asserted.
+# sandbox has its own wagterm.conf, so the replay half is checkable here rather than asserted.
 Cell -Name 'replay' -Kill -Conf @('restore-commands = true') -Setup {
     param($s)
     $produced = @(Setup-ContextAndCapture $s 'replay: typed back after a kill' 'replay')

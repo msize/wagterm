@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Rust-parity oracle passes FfiCell* across the C ABI (RustParityTests). -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Wagterm.Core/Wagterm.Core.csproj" />
+    <!-- PInvokeCharSetTests reflects over the BUILT Wagterm.Win32 assembly (it can't reference it:
+         that's a net10.0-windows WinExe and this is net10.0). Build-order only — no assembly
+         reference, TFM check skipped. Without this the test fails with "build Wagterm.Win32 first"
+         in any fresh clone or worktree, and only passed in CI because the workflow happens to run a
+         full solution build in an earlier step. -->
+    <ProjectReference Include="../../src/Wagterm.Win32/Wagterm.Win32.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true"
+                      Private="false" />
+  </ItemGroup>
+</Project>

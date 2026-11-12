@@ -24,10 +24,10 @@ Baseline on this machine (captured before any changes):
 ## Test loop (once Stage B/C exist)
 
 1. `tools/defterm-restore-conhost.ps1` — confirm baseline (a plain `cmd` opens in conhost).
-2. `tools/defterm-register.ps1` — register agwinterm as the default terminal (writes agwinterm's
+2. `tools/defterm-register.ps1` — register wagterm as the default terminal (writes wagterm's
    DelegationTerminal CLSID; registers the out-of-proc COM server).
 3. Launch a console app (e.g. `cmd` from Win+R, double-click a `.bat`) → it should open **inside a new
-   agwinterm session/window** via the handoff.
+   wagterm session/window** via the handoff.
 4. Type / run something → confirm I/O and resize work.
 5. `tools/defterm-restore-conhost.ps1` — revert. Confirm console apps open in conhost again.
 

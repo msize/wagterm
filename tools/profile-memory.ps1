@@ -1,14 +1,14 @@
-# Memory-leak churn harness for agwinterm.
+# Memory-leak churn harness for wagterm.
 #
 # Drives the app through repeated create/destroy cycles (sessions, overlays, splits, themes,
-# window resizes, heavy output) via agwintermctl, sampling working set, private bytes, kernel
+# window resizes, heavy output) via wagtermctl, sampling working set, private bytes, kernel
 # handles, and GDI/USER handles between phases. A leak shows up as monotonic growth that
 # repeats on a SECOND round of the same churn (round 1 growth alone can be warm caches / lazy GC).
 #
 # Usage:  pwsh tools/profile-memory.ps1 [-Exe <path>] [-Ctl <path>] [-Cycles 30]
 param(
-    [string]$Exe = "$PSScriptRoot\..\src\Agwinterm.Win32\bin\Debug\net10.0-windows\win-x64\Agwinterm.Win32.exe",
-    [string]$Ctl = "$PSScriptRoot\..\src\Agwinterm.Ctl\bin\Debug\net10.0-windows\agwintermctl.exe",
+    [string]$Exe = "$PSScriptRoot\..\src\Wagterm.Win32\bin\Debug\net10.0-windows\win-x64\wagterm.exe",
+    [string]$Ctl = "$PSScriptRoot\..\src\Wagterm.Ctl\bin\Debug\net10.0-windows\wagtermctl.exe",
     [int]$Cycles = 30
 )
 $ErrorActionPreference = 'SilentlyContinue'
@@ -17,7 +17,7 @@ Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern uint 
 
 $script:Samples = @()
 function Sample([string]$label) {
-    $p = Get-Process Agwinterm.Win32 | Select-Object -First 1
+    $p = Get-Process Wagterm.Win32 | Select-Object -First 1
     if (-not $p) { Write-Warning "app gone at '$label'"; return }
     $p.Refresh()
     $s = [pscustomobject]@{
@@ -78,9 +78,9 @@ function HeavyOutput([string]$tag) {
 }
 
 # ---- run ----
-Get-Process Agwinterm.Win32 | Stop-Process -Force; Start-Sleep 1
+Get-Process Wagterm.Win32 | Stop-Process -Force; Start-Sleep 1
 Start-Process $Exe
-for ($i = 0; $i -lt 15; $i++) { Start-Sleep 1; if ((& $Ctl ping) -match 'agwinterm') { break } }
+for ($i = 0; $i -lt 15; $i++) { Start-Sleep 1; if ((& $Ctl ping) -match 'wagterm') { break } }
 Start-Sleep -Seconds 3
 Sample "baseline"
 
@@ -100,4 +100,4 @@ if ($r1 -and $r2) {
         ($r2.WS_MB - $r1.WS_MB), ($r2.Priv_MB - $r1.Priv_MB), ($r2.Handles - $r1.Handles),
         ($r2.GDI - $r1.GDI), ($r2.USER - $r1.USER), ($r2.Threads - $r1.Threads))
 }
-Get-Process Agwinterm.Win32 | Stop-Process -Force
+Get-Process Wagterm.Win32 | Stop-Process -Force

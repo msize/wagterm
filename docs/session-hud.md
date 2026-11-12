@@ -5,9 +5,9 @@ its dimensions, taking keyboard focus, capturing the mouse or changing notificat
 It is native presentation: no shell, helper process, temporary message file or restore state.
 
 ```powershell
-agwintermctl session hud "Preparing review" --detail "Reading the diff" --spinner --position top-right
-agwintermctl session hud update "Review ready" --text-color '#80ff80'
-agwintermctl session hud close
+wagtermctl session hud "Preparing review" --detail "Reading the diff" --spinner --position top-right
+wagtermctl session hud update "Review ready" --text-color '#80ff80'
+wagtermctl session hud close
 ```
 
 `open` is optional before the message. Use explicit `open` for a message that is literally

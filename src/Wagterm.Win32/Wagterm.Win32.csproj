@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Wagterm.Win32</RootNamespace>
+    <AssemblyName>wagterm</AssemblyName>
+    <Product>WagTerm</Product>
+    <Company>msize</Company>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- The ConPTY package picks its OpenConsole.exe by $(PlatformTarget), which is still empty when its
+         props run; this x64-only app needs x64\OpenConsole.exe beside conpty.dll. -->
+    <ConptyRequiresx64Host>true</ConptyRequiresx64Host>
+    <ApplicationIcon>assets\wagterm.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct2D1" Version="3.8.3" />
+    <PackageReference Include="System.Drawing.Common" Version="10.0.9" />
+    <!-- Microsoft's ConPTY (conpty.dll + x64\OpenConsole.exe beside the exe): unlike the inbox conhost it
+         forwards an app's color, device-attribute and cursor queries to wagterm (#339). -->
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.24.260710001" />
+    <ProjectReference Include="../Wagterm.Core/Wagterm.Core.csproj" />
+    <ProjectReference Include="../Wagterm.Pty/Wagterm.Pty.csproj" />
+  </ItemGroup>
+  <!-- Ship the app icon next to the exe (loaded at runtime for the window/taskbar icon). -->
+  <ItemGroup>
+    <None Include="assets\wagterm.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <!-- Bundle the curated ghostty theme files next to the exe (output themes/ dir). -->
+  <ItemGroup>
+    <None Include="..\..\themes\*.conf">
+      <Link>themes\%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+  <!-- Also embed the same themes in the assembly so the single-file portable exe works with no
+       on-disk themes\ dir (disk copies still win by name when present). -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\themes\*.conf">
+      <LogicalName>theme:%(Filename)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

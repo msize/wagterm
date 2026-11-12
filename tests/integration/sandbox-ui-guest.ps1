@@ -1,7 +1,7 @@
 param(
-    [string]$InputDirectory = 'C:\AgwintermInput',
-    [string]$ResultsDirectory = 'C:\AgwintermResults',
-    [string]$WorkDirectory = 'C:\AgwintermTests'
+    [string]$InputDirectory = 'C:\WagtermInput',
+    [string]$ResultsDirectory = 'C:\WagtermResults',
+    [string]$WorkDirectory = 'C:\WagtermTests'
 )
 $ErrorActionPreference = 'Stop'
 if ($env:USERNAME -ne 'WDAGUtilityAccount') {

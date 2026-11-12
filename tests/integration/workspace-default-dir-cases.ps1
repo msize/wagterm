@@ -64,7 +64,7 @@ try {
     $nodeSet = WsDefault-TreeWorkspace $wsSet
     Check 'tree carries defaultDir after set' ($null -ne $nodeSet -and [string]$nodeSet.defaultDir -eq $setDirFull)
 
-    $bad = Invoke-Ctl @('workspace', 'default-dir', 'set', 'Z:\agwinterm-no-such-default-dir', '--target', $wsSet)
+    $bad = Invoke-Ctl @('workspace', 'default-dir', 'set', 'Z:\wagterm-no-such-default-dir', '--target', $wsSet)
     Check 'workspace default-dir set refuses missing directory' (-not $bad.ok)
     $nodeAfterBad = WsDefault-TreeWorkspace $wsSet
     Check 'tree defaultDir unchanged after refused set' ($null -ne $nodeAfterBad -and [string]$nodeAfterBad.defaultDir -eq $setDirFull)

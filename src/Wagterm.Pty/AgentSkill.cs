@@ -1,0 +1,538 @@
+using System.IO;
+
+namespace Wagterm.Pty;
+
+/// <summary>
+/// The bundled agent skill (agterm-style self-onboarding): a SKILL.md that teaches an
+/// agent to drive wagterm via wagtermctl / the control pipe. Installed to
+/// ~/.claude/skills/wagterm/ and ~/.codex/skills/wagterm/ so an LLM self-discovers it.
+/// </summary>
+public static class AgentSkill
+{
+    private static string Home => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+    public const string SkillMarkdown =
+        """
+        ---
+        name: wagterm
+        description: Use when running inside the WagTerm terminal (env WAGTERM_ENABLED=1) to control it — report agent status, create/switch/close sessions, type into sessions, query the session tree, and display images — via the wagtermctl CLI or its control pipe.
+        ---
+
+        # WagTerm
+
+        WagTerm is a Windows terminal built for AI coding agents. When you run inside it you can
+        control it: report your status (a colored dot per session in the sidebar), manage sessions,
+        type into sessions, and show images — via the `wagtermctl` CLI (preferred) or by writing
+        one newline-delimited JSON request to its control pipe.
+
+        ## Detect
+        You are inside WagTerm when `WAGTERM_ENABLED=1`. Relevant env vars:
+        - `WAGTERM_SESSION_ID` — your session id (the default target for commands). Unique PER PANE:
+          two agents in a split can't collide (each pane resolves as its own target). Inside a scratch, an
+          overlay or the quick terminal it is THAT cover's id: `session text` / `type` / `keys` with no target act on
+          the cover you run in. `session overlay` verbs resolve it by what it names — from inside a PANE overlay a
+          bare `session overlay close` closes your own slot (see Overlays); from inside a scratch the bare form is the
+          owning session's SESSION-WIDE slot (pass `--pane` or `--target` for anything else); from inside the quick
+          terminal it is refused `no session matches that target` (the quick terminal belongs to no session).
+        - `WAGTERM_PANE_ID` — explicit pane identity (same value; use when you specifically mean the pane).
+        - `WAGTERM_WINDOW_ID` — your window id.
+        - `WAGTERM_PIPE` — the control pipe name (full path `\\.\pipe\<name>`).
+
+        ## Report your status (do this — it is the point)
+        Let the user see your state at a glance:
+        - `wagtermctl session status active`     — working
+        - `wagtermctl session status blocked`    — you need the user
+        - `wagtermctl session status completed`  — finished
+        - `wagtermctl session status idle`       — clear it
+
+        Flags (any status): `--sound [name]` plays a cue (default alert, a system-sound name
+        `beep|asterisk|exclamation|hand|question`, a Windows sound-event alias, or a `.wav` path);
+        `--blink` pulses the sidebar dot + title-bar bell until cleared; `--auto-reset` clears the
+        status back to idle the moment the user selects the session. Example, when you need attention:
+        `wagtermctl session status blocked --sound --blink`.
+        (A default blocked cue can also be set once via `blocked-sound =` in the config.)
+
+        Better: run `wagtermctl install hooks` once. It wires Claude Code, Codex and Devin hooks so your
+        status updates automatically (active while working, blocked on permission prompts, completed on stop);
+        trust the Codex hooks once with /hooks. It also adds a SessionStart hook to Claude, Codex and Devin so the pane
+        resumes your exact session after a restart or reboot, in any shell;
+        and installs a generic PowerShell-profile bridge that marks any command matching `$env:WAGTERM_AGENT_RE`
+        active/completed.
+
+        ## Manage sessions & workspaces
+        - `wagtermctl tree --json`                              — list workspaces+sessions (id, name, active, status,
+          `statusChangedAt` = epoch SECONDS of the last status write on the pane whose status the node is
+          showing — its liveness clock. Every status write to that pane restamps it, including a re-assert of
+          the same status, so `now - statusChangedAt` is how long ago that agent last said anything: a large
+          age next to `"status":"active"` means the hook died, not that work is still running. In a split
+          session the age belongs to the pane whose status won: a write to a pane that LOSES the
+          aggregate does not move it, but panes tied at the winning status all do, so two panes both
+          `active` report the freshest of the two: the session-level age cannot tell a dead hook
+          from a live one beside it, and no verb reports the stamp per pane. Always present, even
+          for an idle session that never set one)
+        - `wagtermctl events [--since CURSOR] [--limit N]`      — poll the event log (status/notification/session/tree changes); returns {cursor, events:[{seq,type,session,info}]}. Pass the returned cursor as --since next poll.
+        - `wagtermctl session new [--name N] [--cwd DIR] [--workspace ID|--workspace-name NAME [--create-workspace]] [--command "PowerShell code"] [--command-mode powershell|direct] [--profile NAME] [--link URL] [--no-select] [--wait]`
+          `--link URL` sets the new session's link (see `session link`); a bad URL is refused before anything is created.
+          `--no-select` creates the session in the background without stealing focus or changing the current selection.
+          `--command` runs PowerShell code and leaves an interactive prompt. `--wait` is accepted in this mode; the prompt stays open either way.
+          — create a session (prints its id). `--command-mode direct` launches executable + arguments using Windows quoting, with no added shell; it refuses `--wait`. An exited standalone pane remains visible without an interactive prompt. Profile/login-shell tabs show an in-terminal exit hold and close when you press Enter.
+          `--profile NAME` picks a shell profile (default = Windows PowerShell). `--command` and `--profile` are mutually exclusive.
+          `--workspace` is a workspace id (or unique id prefix; `tree --json` lists them), `--workspace-name` its sidebar label
+          (case-insensitive). **An unknown workspace is refused** (`ok:false`, no session created) — it is never swapped for the
+          active workspace: an unknown id, or an unknown name without `--create-workspace`, is an error that names the value.
+          `--workspace-name NAME --create-workspace` creates the workspace when it does not exist and reuses it when it does.
+          `--workspace` and `--workspace-name` together are refused; pass one. **Omit both and the session lands in YOUR
+          workspace** — the workspace of the pane you run in (the CLI sends its `WAGTERM_SESSION_ID` as the caller), however
+          the user has clicked around meanwhile. Sessions go next to you unless you say otherwise, and `--workspace` is how you
+          say otherwise. Only a CLI whose pane the answering window cannot see falls back to the active workspace — the one
+          the user last clicked, which moves under you: a script from an unrelated shell, a pane that has since been closed,
+          or a pane in ANOTHER WINDOW (with no `--window`, the frontmost window answers, and its host knows only its own
+          panes — pass `--window` to reach yours, see "Windows").
+        - `wagtermctl session duplicate [ID]` — clone a session (same cwd + shell profile) as a new session (default: active).
+        - `wagtermctl session restore "<command>" --target PANE` — pin a command to re-run on every restart for that pane; `none` clears.
+          The target is mandatory (no active-pane default: a pin outlives whatever is active now; inside a session `WAGTERM_SESSION_ID`
+          is the pane). Replies `{action:"pinned"|"cleared", pane, session[, command]}` naming the pane it landed on — a session
+          NAME lands on its focused pane, a session ID on the pane that carries that id while one does, and on the FOCUSED
+          pane while none does (see the splits section for when that is) — exactly as `session type` does. Read it back in
+          `tree --json` as `restoreCommands`: an object keyed by pane id listing only pinned panes (absent when none).
+          An unknown target, or a scratch/overlay/quick pane (never restored), is refused and nothing is pinned.
+        - `wagtermctl profiles list` — shell profiles (cmd, Windows PowerShell, PowerShell 7, Git Bash, WSL:*, custom); `* ` marks the default.
+          Profiles live in `%LOCALAPPDATA%\wagterm\profiles.json` (auto-seeded from detected shells; edit to add your own — name/command/args/cwd/icon/env); `wagtermctl profiles reload` re-reads it.
+        - `wagtermctl session select <id>` / `session close <id>`
+        - `wagtermctl session rename <new-name> [--target ID]` — set a session's custom name (sidebar + title bar).
+          It names a SESSION, and a PANE id names the session that pane belongs to — worth knowing, because
+          `WAGTERM_SESSION_ID` is your PANE's id and is what the CLI sends when you pass no `--target`: from
+          inside a split pane, a bare `session rename` names the session BOTH panes are in, not your half (a pane
+          has no label of its own — the sidebar draws one row per session). Replies `{session, name}` naming the
+          session it landed on and the name IN EFFECT, so you can see which one took it; read it back in
+          `tree --json` as `name`. A blank name is refused, and so is a target that belongs to no session
+          (the quick terminal).
+        - `wagtermctl session context <text> [--target ID]` — ONE LINE of "what is this pane for", shown dimmed after the
+          name in the title bar and the sidebar row and on the palette's second line, where the name has to stay short.
+          It survives a restart (and `session reopen`), and `tree --json` reads it back as `context` on the session node
+          (absent when none) — so set it when you start a task and any agent can see what each pane is doing. The value
+          is one line: a newline, tab or other control character is REFUSED (a control byte in the title bar is a
+          rendering accident, not a context), blank is refused, and more than 200 characters is refused — the ceiling is
+          the display budget of the row, not a storage limit. `--clear` removes it (text beside `--clear` is refused);
+          `--stdin` takes the text from stdin the way `session type --stdin` does (one trailing newline dropped, an
+          embedded one then refused). Replies `{session, context}` with the value IN EFFECT after the write, read off the
+          session; the target resolves as `session rename` does (a scratch/overlay cover id lands on the session under it).
+        - `wagtermctl session link <url> [--target ID]` — the ONE http(s) URL the session is about: the tracker issue it
+          works on (Jira, GitHub, Linear, …) or the pull request it reviews. The sidebar draws a link glyph left of the
+          name; a click on it, Ctrl+Shift+L or `session link --open` opens it in the user's browser, and the session
+          palette (Ctrl+P) finds the session by it. **When you start work on an issue or a PR review, set the link to its
+          URL** (with the context for the one-line "what"), so the user can jump to it; replace it when the task moves to
+          another issue or PR. Only a full absolute `http://` / `https://` URL is accepted — no issue-key shorthand,
+          whitespace, control characters or more than 2048 characters. One link per session: setting it again replaces
+          it, `--clear` removes it (a URL beside `--clear` is refused). It survives a restart and `session reopen`;
+          `tree --json` reads it back as `link` on the session node (absent when none). Replies `{session, link}`;
+          `--open` replies `{session, link, opened}` and is refused for a session without a link. The target resolves as
+          `session context` does. Custom commands get it as `{WAG_LINK}` / `$WAG_LINK`.
+        - `wagtermctl session seen [--target ID]` — clear a session's unseen-notification badge headlessly
+        - `wagtermctl session output [--target ID]` — the LAST COMPLETED command's output (FTCS marks;
+          pwsh sessions emit them automatically) — cleaner than parsing `session text` yourself
+        - `wagtermctl sidebar state` — read-back `<visible|hidden> <tree|flagged> <width>`, e.g. `visible tree 220`:
+          visibility, view mode and width (DIP) in one call (`ping` reports the app version)
+        - `wagtermctl sidebar width [N]` — read (no N) or set the sidebar width in device-independent pixels. Replies
+          `{width, visible[, applied[, note]]}` with the width ACTUALLY in effect, so compare `width` with what you asked
+          for. N outside 120..600 is REFUSED with the range named (nothing moves), never clamped — `sidebar hide` is how
+          you ask for no sidebar. A set while the sidebar is hidden is remembered and persisted but not applied
+          (`applied:false` + a note); it takes effect on the next `sidebar show`. Persists across restarts.
+        - `wagtermctl version [--json]` — which CLI binary you just ran (version + its resolved path) and which app
+          answered (version + pipe), on two greppable lines, `cli` and `app`. Several wagtermctl.exe can coexist and
+          none need be on PATH; this says which one this was. It exits 0 and still prints the `cli` half when no app
+          answers, marking the app `unavailable` — that is the case it exists for
+        - `wagtermctl session go next|prev|first|last|next-attention|prev-attention` — move the active session
+        - `wagtermctl session move --to up|down|top|bottom`     — reorder within its workspace
+        - `wagtermctl session move <workspace-id>`             — relocate to another workspace
+        - `wagtermctl workspace new [name] [--default-dir DIR]` / `workspace default-dir set <path>|clear [--target WS]` / `workspace rename <name> [--target WS]` / `workspace select [--target WS]` / `workspace move --to <dir> [--target WS]` / `workspace delete [--target WS]`
+        - `wagtermctl workspace go next|prev [--window ID]` (also `--to`, alias `previous`) wraps visible workspaces, including collapsed ones; refuses flagged mode, no other destination, quick windows and explicit `--target`.
+          An empty destination becomes current without closing the selected terminal. New-session explicit workspace/caller placement still wins over this fallback.
+          Tree `foregroundShells` (pane-order, null unknown) and primary/split aliases are conservative Windows shell hints, never idle-prompt or input-safety proof.
+        - `wagtermctl workspace collapse [WS] [--target WS]` / `workspace expand [WS]` — collapse/expand a single workspace's session list (default: active)
+
+        ## Native picker (P16, full app; lite mirror pending)
+        - Pipe UTF-8 lines or JSON `[{"id":"a","label":"Alpha","subtitle":"optional consequence"}]` to `wagtermctl pick [open]`.
+        - `--prompt TEXT --query TEXT --allow-custom --window ID --follow --no-block`; no session target. Default display does not steal foreground; follow requests OS activation. Auto input treats leading `[` as JSON; use `--input-format lines` for `[Draft]`-style line labels, or `json` to require JSON.
+        - `--no-block` returns JSON `{id}`. Otherwise waits by exact id without a window selector; picked/custom exit 0, cancelled 2. Ctrl+C/failure best-effort cancels the owned pending picker.
+        - `pick result ID` prints the JSON outcome (`result: pending|picked|custom|cancelled`); pending exits 1. Picked adds item id/label/original index; custom adds trimmed query.
+        - `pick cancel ID` is idempotent for retained answers. Result/cancel optionally restrict `--window`; omit it for global exact-ID lookup across focus/owner closure.
+        - One pending/window, eight completed/window, 32 closed-window answers. Quick refuses. Items never execute; matching searches labels only, custom appears only when no item matches.
+        - Max 1000 items, 4096 UTF-16 units/field, 1 MiB UTF-8 stdin/open args; duplicate IDs and display controls refuse. Open/result JSON is payload even with --json; cancel uses the normal envelope under --json.
+        - Filtering work caps total label UTF-16 units times distinct query terms at 64 Mi. Over-complex edited queries disable choice until corrected. Mouse capture blocks opening; file drops on the owner are discarded.
+        - Initial UI open waits 10s and withdraws/rolls back on timeout. Best-effort cancel needs the received picker ID; a lost successful open reply can require user Escape/Cancel. No exactly-once transport guarantee.
+
+        ## Read a session's output
+        - `wagtermctl session text [--all|--lines N] [--target <id>]` — dump the pane as plain text. Without a flag that is
+          the visible screen; `--lines N` returns the last N lines ending at the bottom of the screen, reaching back into
+          scrollback — which is where a launch banner or an error printed before a full-screen app started still lives;
+          `--all` is the whole buffer, screen + scrollback (`--all` with `--lines` is refused, nothing read). A pane id
+          reads the shell in that pane even while a pane overlay covers it; the overlay's own id, or no target while
+          the focused pane holds one, reads the overlay (see Overlays)
+        - `wagtermctl session text --styles [--all|--lines N] [--target <id>]` — JSON `{cols,rows:[{row,runs}],cursor:{row,col}}`
+          from one snapshot. Runs carry `col,width,text,faint,bold,italic,underline,inverse,strike,fg,bg`; colours are
+          `default`, `idx:N`, or `#rrggbb`. Coordinates/widths are grid cells, not character counts; negative rows are
+          history. Trailing whitespace (even styled) and trailing empty rows trim like plain text. On a known composer
+          using faint suggestions, inspect runs in the cursor row where `col+width > cursor.col`: an all-faint suffix
+          is consistent with a suggestion, a non-faint run with a draft. Verify the composer and text before the caret;
+          this is an app-specific heuristic, not proof. `--json` keeps the reply envelope; agliteterm answers it too, over
+          its own row selection. `session overlay text --styles` is refused; use `session text --styles --target <overlay-id>`.
+        - `wagtermctl session copy [--target <id>]`            — return the session's current mouse text selection ("" if none);
+          resolved like `session text`: `--target <pane id>` reads the shell under a pane overlay, no target or
+          `--target active` reads the focused surface (the overlay while one is up), and `session overlay copy`
+          reads a pane overlay's own selection by slot
+        - `wagtermctl surface cursor [--target <id>]`          — the caret COLUMN of a pane, as a bare integer.
+          Use it before typing into ANOTHER agent's composer: an empty composer parks the caret at a known
+          column, so a different column means a draft is sitting there and you should not send. The same
+          column is necessary, not sufficient: a draft whose length is an exact multiple of the pane width
+          wraps the caret back to the column it started at, so back a match with `session text` of the
+          composer row before typing. After a print into the last column the answer equals the pane width
+          (the wrap is deferred), so do not use it as an index into a `session text` row without clamping.
+          A pane id
+          reports that pane; a session NAME reports its focused pane. (A session id targets the pane that carries it
+          while one does, same as `session text`/`session type`, so the pane you check is the pane you type into. While
+          NO pane carries it — the carrier was closed, however it was closed — the id behaves like a NAME and reaches the
+          FOCUSED pane, which can change under you: in a split session, address panes by the ids `tree --json` lists.)
+          Reading rendered text and guessing at placeholder strings is what this replaces
+        - `wagtermctl session search "<term>"`                 — open the find bar over the active session; returns "N of M" (or "no matches")
+        - `wagtermctl session search --next|--prev|--close`    — step matches / close the find bar
+
+        ## Selection & clipboard
+
+        A paste can also refuse with `the pane's input is closed` before clipboard access: no bytes
+        were sent by that request, and this does not assert that the child exited. A send-command
+        failure during broadcast may follow delivery to other panes; never retry it blindly.
+        - `wagtermctl selection all [--target <id>]`           — select the whole buffer (scrollback + live grid)
+        - `wagtermctl selection copy [--target <id>]`          — copy the current selection to the Windows clipboard
+        - `wagtermctl selection clear [--target <id>]`         — clear the selection
+        - `wagtermctl session paste "<text>" [--target <id>]`  — paste text into the pane (clipboard if text omitted; honors bracketed paste); replies `pasted` (handed to the pane's input, NOT proof a program read it — verify with `session text`), or `nothing to paste` when neither the text nor the clipboard gave any; refused (ok:false) on a read-only pane and on a pane whose process has exited (nothing sent, clipboard unread; the exit is observed a moment after it happens, so a paste right after a child dies can still reply `pasted`), and as `paste failed: <why>` when the write threw (the clipboard may have been read and part of the payload may have landed — do not retry blindly)
+        - keys: Ctrl+C (copy selection) · Ctrl+V (paste) · Ctrl+Shift+A (select all) · double/triple-click = word/line · drag past the edge auto-scrolls
+        - config `copy-on-select = true` auto-copies each finished selection (no Ctrl+C needed)
+
+        ## Type into a session
+        - `wagtermctl session type "npm test" --target <id>`   — send keystrokes (newline = Enter). Control bytes are
+          REFUSED, not stripped: a NUL would truncate your command while its Return still fired. Add `--allow-control`
+          when you really mean one (an escape sequence for a TUI, a lone ^C). `session write` is NOT the way — it
+          injects into the display, not into the program's input; but a terminal query in the payload is answered
+          onto the program's input, and a mode it sets (mouse, focus, bracketed paste, key encoding) changes what
+          the program receives from then on. What it paints is NOT durable: the program's next repaint, and the one
+          every pane resize triggers (a window resize, `session split`, a split-ratio change, `session split close`),
+          paints over it, and it does not survive into scrollback — write once the layout has settled, or read it back
+        - `wagtermctl session type --stdin --target <id>`      — the text is STDIN, as bytes. This is how text with
+          quotes, newlines, runs of spaces or a leading `--` is sent: positionals are re-joined with one space and
+          the option parser eats a leading `--`, both silently. Pipe a here-string (`@"..."@ | wagtermctl session
+          type --stdin --target <id>`) or redirect a file. Exactly one trailing newline is dropped (the one the
+          shell adds), so end the text with TWO newlines to press Enter. Invalid UTF-8 is refused with the byte
+          offset and NOTHING is sent (exit 2). `--stdin` with positional text or `--select` is refused as ambiguous.
+          `--allow-control` still applies. There is no `quick type` verb: the quick terminal is a pane whose id starts
+          with `quick:`, so `session type --stdin --target quick:` types into it (once `quick on` has created it)
+
+        ## Scratch & quick terminals
+        - `wagtermctl session scratch on|off|toggle [--target <id>]` — a per-session extra shell drawn over that session's content (opens in the session's cwd; stays alive when hidden; not restored)
+        - `wagtermctl quick on|off|toggle` — one app-level detached shell (home dir; stays alive when hidden; not restored). API shows stay pinned without taking focus; human toggles dismiss on blur. `--window quick --target active` addresses its surface. `quick-terminal-size` is 40–90% of the pointer monitor's work area; `quick-terminal-hotkey` is opt-in, empty by default. See `docs/quick-terminal.md`.
+
+        ## Overlays (run a program over a session — or over ONE pane of it — ephemerally)
+        The rule, quoted from `ISessionHost.SessionOverlay` (the CLI header quotes it too):
+          A session has three overlay slots: one session-wide and one per pane. A session-wide overlay
+          covers the whole session (every pane, and any pane overlay under it), as today. A pane overlay
+          covers exactly one pane's box - always the full box, never floating - and the sibling pane stays
+          visible and interactive. --pane left|right names the slot: left is pane 0 and right is pane 1
+          whatever the axis (on a horizontal split left is the top pane), a non-split session accepts
+          --pane left, and the flag omitted means the session-wide slot - today's behaviour, byte for
+          byte. A pane overlay is that pane's surface while it is open: keys typed into the focused pane,
+          the mouse inside the pane's box and --target active reach the overlay; --target with a pane id
+          reaches the shell underneath (agterm: "session text reads the surface underneath"); --target
+          with the overlay's id reaches the overlay from anywhere, and on session overlay itself names
+          that overlay's slot - the same as passing its --pane word - for as long as the id resolves (an
+          overlay that closed is reached by --pane only); with --pane naming the other side it is refused.
+          The slot moves with its pane (a swap, a split close of the other pane) and dies with it (split
+          close, split off, the shell exiting when that removes the pane - a single-pane session keeps an
+          exited shell on screen, and its overlay with it - session close, the window closing).
+        - `wagtermctl session hud [open] "message" [--detail "text"] [--spinner] [--position top-right] [--target <session id>]`
+          — passive session-wide text; shell input, mouse, history and dimensions are unchanged. Nine anchors:
+          top-left/top-center/top-right, center-left/center/center-right, bottom-left/bottom-center/bottom-right;
+          top/bottom aliases normalize, default center. Optional --size-percent 1..100 bounds width to 10..80%,
+          --spinner-style bar|braille|circle|blocks|dot|none, --background-color and --text-color #rrggbb.
+          `hud update "message"` replaces the whole spec except its original background; omitted options reset.
+          `hud close` dismisses only the HUD. Open replaces a HUD but refuses over a program overlay; program
+          overlay open replaces a HUD. Overlay close/the ordinary close shortcut dismiss a HUD too. Tree's hud
+          object is its read-back. No timeout or persistence. Max 256 normalized Unicode scalars per text field,
+          no control characters, nonblank message. Split-pane-only/auxiliary ids refuse: name the owning session.
+          Scratch/quick/dashboard obscure it. See docs/session-hud.md for exact wire fields and clipping limits.
+        - `wagtermctl session overlay open "<command>" [--pane left|right] [--size-percent N] [--wait] [--block] [--target <id>]`
+          — run `<command>` in a throwaway terminal over the session (or, with `--pane`, over that one pane's box); it vanishes when the program exits, leaving the session untouched. Returns the overlay id.
+          `--size-percent N` (1..100) makes it a centered floating panel over a dimmed session (default = full content region). The session gets a `* (overlay)` tag in `tree`.
+        - **The pane form** (`--pane left|right`): the id it returns is `<pane id>:overlay:<hex>`, so the pane is readable
+          off it. The other pane keeps rendering and taking input; `session type --target <that pane id>` still lands in
+          its shell; the overlay runs in the pane's cwd at the pane's font size. `tree --json` lists the open pane slots as
+          `"paneOverlays":["left"]`, `["right"]` or `["left","right"]` inside the session node — OMITTED when none is open,
+          independent of `overlay` (the session-wide slot; both can be up at once, and the session-wide one covers the
+          pane overlays until it closes). Reading it: `session text --target <overlay id>` (or `overlay text --pane X`)
+          is the program's screen; `session text --target <pane id>` is the shell UNDERNEATH it; `session text` with no
+          target reaches the overlay while its pane is the focused one. `--target` may be the session id, either pane
+          id, or either pane's overlay id (`<pane id>:overlay:<hex>`, the id `open --pane` returned), but one that names
+          the OTHER side than `--pane` is refused (`'<id>' is the right pane; --pane left names the other one. Nothing
+          opened.`, or `'<id>' is the right pane's overlay; --pane left names the other one. Nothing opened.`) — the
+          caller named two panes. That overlay id with `--pane` OMITTED names its own slot, exactly as its word would,
+          for as long as it resolves (`close`, `result`, `copy`, `text`; `open` on it is `pane overlay already open`;
+          `resize` and `--size-percent` are refused naming the overlay, since a pane overlay is always full-pane) — so a
+          program run INSIDE a pane overlay, whose `WAGTERM_SESSION_ID` is that overlay's id, aims its bare
+          `session overlay` verbs at its own slot and needs `--target <session id>` to reach the session-wide one. Once
+          the overlay closed its id resolves nowhere: `--pane X` is then the only way to that slot (its `result`); an id
+          that stops resolving WHILE a call is in flight (the overlay closed under it) is refused `'<id>' no longer names
+          an open pane overlay: ... retry with --pane <its side>` — `ok:false`, retry by the word, not by the id. What
+          is REFUSED with a pane, `ok:false`
+          and nothing opened, each starting with agterm's phrase: `pane not visible` (`--pane right` on a one-pane
+          session — we never hide a pane, so that is the only case; pass `--pane left` or omit it),
+          `pane overlay already open` (that slot holds one; close it first or read it — a pane slot NEVER silently replaces, unlike the
+          session-wide slot, which replaces as today), a `--pane` word other than exactly `left`/`right` (`Left`, `top`
+          and a pane id are refused naming both words), `--pane` with `--size-percent` (a pane overlay is always
+          full-pane; the CLI exits 2 and sends nothing, a raw client is refused with the same words) and `resize --pane`
+          (nothing to resize to). In the UI: `Ctrl+Shift+W` closes the focused pane's overlay before it would close the
+          pane; `Esc` (`close_cover`, if bound) closes the session-wide cover if one is up, else the focused pane's
+          overlay; a click in a pane's box focuses that pane and lands in its overlay; the divider still drags.
+          The range is VALIDATED, not clamped: `0`, `-5`, `150`, `sixty` and a quoted `"60"` are each refused (`ok:false`,
+          the value and the range named) and NO overlay opens — read `tree` to confirm. To ask for the full region, omit
+          the flag; there is no number that means it. The same rule applies to `overlay resize --size-percent N`, whose
+          reply `resized N%` is always the N you asked for.
+        - `--wait` keeps the panel after the program exits (shows "press any key to close") instead of auto-dismissing.
+          With `--pane` the banner sits at the bottom of THAT pane's box and only a key typed into that pane (while it is
+          the focused one) dismisses it — a key in the other pane goes to the other pane's shell.
+        - `--block` waits for the program to exit and returns `exit N` (its exit code). Good for `lazygit`, `htop`, an editor, or any pick-a-thing helper you want to run and read the result of.
+          With `--pane` it waits on that slot's program; `closed` when that slot was closed first.
+          The reply is the outcome of the overlay THIS call opened: `closed` when it was closed or replaced before its
+          program exited. `exit 1` also covers a program that could not be started at all (the session's cwd gone,
+          the pty-host down), and a blocking open closes its pane as it replies, so AFTER the call `exit 1` cannot be
+          told from a program that ran and failed. When that distinction matters, do not block: open with `--wait`
+          (the pane stays after the exit and the reply is its id), poll `overlay result` until it says `exit N` — a
+          session-wide open polls the bare form; a `--pane X` open polls `overlay result --pane X` (or `--target <the
+          id the open returned>` while the overlay is up), because a pane open never resets the window-wide value and
+          a pane exit never writes it (a bare poll after a pane open reads whatever an earlier session-wide overlay
+          left there, or waits forever) —
+          `session text --target <that id>` for the output or the start failure (`exit N` is written when the process
+          ends, not when its output is drained — the last lines can still be landing; read again if the text looks
+          cut off), then `overlay close --target <that id>` (a bare `close` closes the ACTIVE session's overlay, which
+          need not be yours; that close answers `ok:false` when the overlay is already gone — a key pressed on the
+          `--wait` prompt, a later open replacing it — which means closed, not failed; `tree` settles it). The bare
+          `overlay result` is ONE value per window — reset to `no overlay` by any session-wide open in the window,
+          written by any session's session-wide overlay exit — so the bare poll is trustworthy only while yours is
+          the only session-wide overlay in the window; `tree` shows which sessions have one. The pane form is per
+          slot and has no such caveat.
+          The window closing under a blocking open answers `ok:false` with the status unknown.
+        - `wagtermctl session overlay close [--pane left|right] [--target <id>]`   — dismiss the overlay now. With `--pane`
+          that slot: `closed`, or `ok` with `no overlay` when the slot is empty (closing nothing is not a failure).
+        - `wagtermctl session overlay result [--pane left|right] [--target <id>]` — WITHOUT `--pane`: the last overlay's
+          `exit N` (or `no overlay`): one value per window, not per session — reset by any session-wide open in the
+          window, written by whichever session's session-wide overlay exits next; it ignores `--target` EXCEPT a live
+          pane overlay's id, which reads that slot as its `--pane` word would (a `--pane` open with `--wait` can be
+          polled by the id it returned; once the overlay closed the id resolves nowhere and the bare form is
+          window-wide again — a session-wide overlay's id never selects a slot). Two session-wide overlays in one window
+          make the bare form name either one's exit. A pane overlay's exit never writes it. WITH `--pane`: that slot's
+          own last result, `exit N` — or refused `overlay still running` (its program is up) / `no overlay result`
+          (nothing has run in that slot since the window opened). The pane form is per slot, the bare form per window:
+          a deliberate divergence from agterm (recorded in `docs/agterm-parity.md`), because the bare form shipped
+          that way.
+        - `wagtermctl session overlay copy [--pane left|right] [--target <id>]` — the text of the selection made INSIDE
+          the overlay (`selection all --target <overlay id>` makes one); `result.text`, printed bare without `--json`.
+          The clipboard is NOT touched; `session copy --target <pane id>` keeps reading the pane underneath (bare, or
+          `--target active`, it reads the focused surface — the overlay — like `session text`). Refused: `no overlay`
+          (with `--pane X`: `no overlay: --pane X names which slot, and nothing is open in it`), `no selection`.
+        - `wagtermctl session overlay text [--all|--lines N] [--pane left|right] [--target <id>]` — the overlay's drawn
+          buffer as `result.text`, the same reader as `session text` (`--lines N` reaches into its scrollback, `--all` is
+          the whole buffer; the pair is refused). Refused: `no overlay` (as above), `failed to read surface buffer` + a colon + why.
+          The buffer is readable the moment `open` returns (the terminal is built before the reply); agterm's
+          `overlay not realized` is kept as the phrase for a slot with no terminal to read yet, which does not happen here.
+        - What is REFUSED (`ok:false`, nothing happened): `open` with no command; `open` and `resize` whenever no
+          session resolves (a `--target` that matches nothing, or no target while no session is active); a `close`
+          whose `--target` names something that does not exist; `open`, `close` and `resize` WITHOUT `--pane` whose
+          `--target` names one pane of a split session (a session-wide overlay covers the whole session — the refusal
+          names the session id to pass instead, and `--pane` is how you name one pane); `resize` on a session with no
+          overlay open; and the pane refusals listed under the pane form above.
+          One `resize` `ok:false` is NOT "nothing happened": the reply that says the window did not run the request
+          within 15 s — that resize is still queued and may land when the window's loop resumes; read `tree`.
+          `close` answers `ok` ("no overlay") when the session resolves and has no overlay, or when the target is
+          absent, empty or `active` while nothing is active — closing nothing leaves "no overlay open" true. These used to
+          answer `ok:true` with the failure as the result text; branch on `ok`.
+
+        ## Notify the user (desktop notification)
+        - `wagtermctl notify "build finished" [--title "npm"] [--category ok|normal|attention] [--target <id>]`
+          — raise a notification against a session: an in-app banner (click it to jump to that session),
+          a count badge on the session's sidebar row (green for ok, yellow for normal, red for attention
+          or an omitted category; mixed unread messages show the highest priority), cleared when you next
+          select it, and an OS
+          tray balloon (unless `desktop-notifications = false` in the config). Great for signaling that a
+          long task finished or that you need attention while the user is looking at another session.
+          You can also emit it straight from the shell with an OSC sequence: `printf '\e]9;%s\a' "message"`
+          (or OSC 777: `\e]777;notify;Title;Body\a`).
+
+        ## Flag sessions & focus a workspace
+        - `wagtermctl session flag on|off|toggle|clear [--target <id>]` — flag a session (a durable working-set
+          mark shown as a flag on its sidebar row; survives moves; persists). `clear` unflags every session.
+        - `wagtermctl sidebar mode tree|flagged|toggle`        — switch the sidebar between the workspace tree
+          and a flat list of just the flagged sessions (great for a curated working set across workspaces).
+        - `wagtermctl workspace focus on|off|toggle`           — show only the active workspace in the tree
+          (hide the rest); a "show all" banner / this verb brings the others back.
+        - `wagtermctl tree --json` reports `"flagged":true` per flagged session.
+        - `wagtermctl session switch begin|advance|advance-back|commit|cancel` — drive the MRU (Ctrl+Tab)
+          recency switcher programmatically (advance previews the next recent session; commit lands it). The
+          interactive equivalent is holding Ctrl and tapping Tab (Shift+Tab walks back, Esc cancels).
+
+        ## Windows (multi-window)
+        Each window is independent: its own workspace/session tree + sidebar. Sessions never move
+        between windows — instead you TARGET a window.
+        - `wagtermctl window list`                             — id (short), name, whether open + which is active.
+        - `wagtermctl window new [--name <name>]`              — open a new window (seeded with 1 workspace + 1 session).
+        - `wagtermctl window select|close|delete|rename <w> [name]` · `window resize <w> W H` · `window move <w> X Y` · `window zoom <w>`
+          (`<w>` = a window id, a unique id prefix, or `active`; the last window can't be deleted).
+        - `--window <id|prefix|active>` targets a specific window on ANY content verb, e.g.
+          `wagtermctl session new --window <prefix> --name build` or `wagtermctl tree --window active`.
+          Omit it to act on the frontmost window. Your own window is `WAGTERM_WINDOW_ID`.
+        - App-global verbs ignore `--window`: `config`, `theme`, `settings`, `keymap`, `install`.
+
+        ## Custom commands (keymap.conf) & the launcher
+        Define commands in keymap.conf, then run them by chord (Ctrl+Shift+O palette) or the control API:
+        Map heads accept alternatives: `map f5 | f7 = next_workspace`, also `map leader a | b = next_workspace`.
+        An invalid alternative rejects the entire map line. Fixed gestures such as F6 keep precedence; pipes in command bodies are unchanged.
+        - `command <Label> = <text>`                    — default "send" mode: types the text into the active session
+        - `command [new] <Label> = <text>`              — run in a fresh session's shell (stays interactive after)
+        - `command [overlay] <Label> = <text>`          — run in an ephemeral overlay pane over the session
+        - `command [detached] <Label> = <text>`         — launch an independent OS process (open a URL, external tool)
+        - Run one: `wagtermctl command run "<Label or raw command>" [--mode new|overlay|detached|send]`
+          (a raw command with no matching label defaults to `--mode new`).
+        - List them: `wagtermctl command list`         — tab-separated `label  mode  chord  text`.
+        - `{WAG_*}` tokens are expanded in the text AND passed as `$WAG_*` env vars to the launched process:
+          `{WAG_SESSION}` (name) · `{WAG_SESSION_ID}` · `{WAG_WORKSPACE}` · `{WAG_CWD}` (active pane cwd) ·
+          `{WAG_PANE_ID}` · `{WAG_APP}` (path to wagtermctl, for callbacks) · `{WAG_LINK}` (the session's link, empty
+          when none). Unknown `{WAG_*}` → empty.
+        - Leader chords (tmux-style): `leader = ctrl+k`, then `map leader b = command:Build`. Press the leader,
+          then the follow-up key. Drive/observe it with `wagtermctl command leader state|begin|cancel|key:<chord>`.
+
+        ## Splits, font, sidebar, theme
+        A session has at most TWO panes. Each pane has its own id (`tree --json` lists them as `paneIds`). THE SESSION-ID
+        RULE, by condition and not by verb: a session id names the pane that carries it while one does — pane 0 of a fresh or
+        reopened session; after a `swap`, either side (a restore keeps the order it saved) — and names the session's FOCUSED
+        pane while none does. None does once
+        the carrier was closed, however it was closed: `split close` on it, Ctrl+Shift+W on it, `split off` after a `swap`
+        (that collapses onto the other pane), or its shell exiting. A later `split` mints a fresh id, so the state persists
+        until the session is closed and reopened (a reopened session's pane 0 carries the id again). In a split session,
+        address panes by their own ids. The split verbs take `--target <id>` as a
+        session or either of its panes and act on THAT session, not the active one; `focus` and `resize` act on the active session.
+        - TO GET A PANE, USE `session split on`. The bare form is `toggle`: on a session that is already split it CLOSES the split
+          and answers the SURVIVOR's id — the session's own shell, the pane you may be typing in — so a launcher that calls it
+          twice types its second command into itself (seen in the field). `on` answers the split pane's id every time, split or not.
+        - `wagtermctl session split [on|off|toggle] [--axis vertical|horizontal] [--target <id>]` — REPLIES WITH A PANE ID, a bare
+          string: `on` = the split pane's id — ALSO when the session was already split (nothing changes; a caller that does not
+          know whether it split gets something addressable either way); `off` = the survivor's id (pane 0), also when already
+          single; `toggle` = whichever it produced. Default op = toggle. The axis names the ARRANGEMENT, agterm's words: vertical = left/right panes (the default of a session never split), horizontal = top/bottom panes.
+          Omitted = keep the session's orientation — remembered for the life of the session, through `off`, and across a
+          restart only while the session is still split (a collapsed session writes no axis, so after a restart it is
+          vertical again; pass `--axis` if it matters); given on an
+          already-split session = re-orient it live. Anything but the two words is refused and nothing is split. `tree --json`
+          reports `axis` beside `paneIds` / `focusedPane` / `splitRatios` whenever `paneCount` > 1.
+        - `wagtermctl session split close [--target <id>]` — close ONE pane, EITHER side (`off` can only keep pane 0): a pane id
+          closes that pane; a session name or no target closes the session's focused pane (what Ctrl+Shift+W does); from your
+          own pane, your pane. Replies with the SURVIVOR's id, which becomes pane 0 with the whole area and the focus. A one-pane
+          session is REFUSED — `session close` is the verb that closes a session. Closing the pane that carries the session
+          id is one of the ways the session-id rule above flips to "the focused pane": keep addressing panes by the ids
+          `tree --json` lists.
+        - `wagtermctl session swap [--target <id>]` — exchange the two panes. What moves: the pane order (left↔right or
+          top↔bottom), the focus (it follows its pane), the two shells' contents and each pane's PANE OVERLAY (the slot is on
+          the pane, so it crosses with it: `paneOverlays` reads `["left"]` where it read `["right"]`, and the overlay is
+          regridded to its pane's new box). What does not: the axis, the divider (the left/top box keeps its size — the
+          contents change places), the session-wide overlay / scratch / quick (they cover the session, not a pane), the
+          status, the context, the flag — and EVERY ID, the overlay ids included. A swap moves panes, never ids: the id you hold keeps reaching the same shell, now on the other
+          side, and the session id keeps naming the pane it always named. Replies `{session, paneIds, focusedPane, axis}` = the
+          tree's split block after the swap. A one-pane session is refused.
+        - `wagtermctl session focus [primary|split|left|right|top|bottom|other]` — move focus between the panes (default
+          `other`, the one word valid on either axis; `primary` = pane 0, `split` = pane 1). `left`/`right` exist on a vertical
+          split only and `top`/`bottom` on a horizontal one — the wrong pair is refused naming the axis; so is a one-pane session.
+        - `wagtermctl session resize [--split-ratio R] [--grow-left N|--grow-right N|--grow-top N|--grow-bottom N]` — move the
+          divider: `--split-ratio` is pane 0's share (0.7 = the left/top pane gets 70%); `--grow-left/--grow-right` move a
+          vertical split's divider by N columns, `--grow-top/--grow-bottom` a horizontal one's by N rows. The other axis's flags
+          are refused and the divider does not move; so is a one-pane session.
+        - `wagtermctl font inc|dec|reset [--target <id>]`      — font zoom; target a session (active pane) or a specific split/scratch/quick pane by its id (see `tree` paneIds)
+        - `wagtermctl dashboard [<id> ...] [--close] [--font-size N]` — grid overlay of live sessions (no ids = most-recent; `--close` dismisses; Ctrl+Shift+D toggles it in the UI)
+        - `wagtermctl sidebar show|hide|toggle|expand|collapse` (`on`/`off` are aliases of show/hide). An op the sidebar
+          cannot do is REFUSED (`ok:false`, nothing changed) — it used to answer `ok` and do nothing. `sidebar width [N]`
+          reads/sets the width (see "Manage sessions & workspaces").
+        - `wagtermctl session background set <image> [--opacity 0..100] [--mode fit|fill|center|tile]` — a faint per-session
+          watermark drawn behind the terminal (the image is copied into app data); `session background clear` removes it.
+          Per-session (honors `--target`/`--window`); persists; `tree` reports `"background":true`.
+        - `wagtermctl theme list` · `wagtermctl theme set "Solarized Light"`
+          Bundled curated themes — dark: Dracula, Tokyo Night, Catppuccin Mocha, Gruvbox Dark, Nord, One Dark, Solarized Dark;
+          light: Solarized Light, Catppuccin Latte, GitHub Light. Drop more ghostty-format files in %LOCALAPPDATA%\wagterm\themes\.
+
+        ## Settings & config
+        - `wagtermctl settings`                                — open the Settings window (grouped appearance/behavior controls)
+        - `wagtermctl config list`                             — every config key with its current value
+        - `wagtermctl config get <key>` · `config set <key> <value>` — read/change a setting (persists to wagterm.conf, applies live)
+          Keys: font-family, font-size, cursor-style, cursor-blink, cursor-blink-ms, theme, scrollback-lines,
+          inactive-pane-dim (0-100, dims non-active split panes), window-opacity (30-100), sidebar-tint (-100..100),
+          scroll-speed (1-10), new-session-dir, right-click-paste, copy-on-select, desktop-notifications, shell-integration,
+          restore-commands, blocked-sound, omp-theme. Changing the theme retints the WHOLE window (sidebar/title/status), not just the terminal.
+
+        ## Config / restore
+        - `wagtermctl keymap reload`                           — re-parse keymap.conf (reports diagnostics)
+        - `wagtermctl restore clear`                           — clear the saved session-tree state
+        - `wagtermctl restore capture [--target ID]`            — capture the foreground command of EVERY real pane (or of the one
+          pane/session named) into its restore slot NOW and save, so a crash, a `Stop-Process`, a power loss or a missed
+          update-quit still finds it there; without this the capture happened only on a clean quit. Call it before a long
+          run, or from a hook. It can take SECONDS (one CIM process query for all panes, up to 15 s) — do not put it on a
+          hot path. Replies `{captured, replayOnRestore, panes:[{pane, session, captured}]}`: `captured` per pane is the
+          command line the shell is running, or `null` = that shell had no non-denylisted child (the honest answer, and
+          it is written into the slot — a fresh capture overwrites an older checkpoint, including to empty; `powershell`,
+          `cmd` and the other shells on `restore-denylist.conf` never count as a command). `replayOnRestore` is the
+          `restore-commands` toggle: the capture ALWAYS happens, but the slot is typed back at restart only when this is
+          true — check it, or `config set restore-commands true`, or the checkpoint is kept and never replayed. Read the
+          slots back in `tree --json` as `capturedCommands`, keyed by pane id like `restoreCommands`. An unknown target,
+          or a scratch/overlay/quick pane (never restored, so no slot), is refused and nothing is captured or saved; a
+          process query that fails or times out is a refusal too, never an empty answer for every pane. ONE refusal
+          leaves something behind and says so: "captured into memory but the state file could not be written" — the
+          slots are filled (`tree` shows them) but this save did not put the checkpoint on disk; fix
+          the state directory and capture again. `session context` / `session rename` replies describe the value in
+          memory the same way — their save is best-effort and silent.
+        - `wagtermctl install hooks|skill|shell`               — install agent-status hooks / this skill / shell-integration (live cwd)
+        - `wagtermctl install cli [--remove]`                  — add (or remove) wagtermctl on the user PATH
+        - `wagtermctl omp list` / `omp set <name> [--persist]` — list / apply oh-my-posh themes (live; --persist keeps it for new sessions).
+          A name that resolves to no theme is REFUSED (`ok:false`, the theme in effect unchanged) — it used to answer `ok:true` with the text.
+
+        ## Show an image inline
+        - `wagtermctl image show C:\path\pic.png --row 2 --col 4`
+        - `wagtermctl image sixel C:\path\pic.six [--row R --col C]` — render a sixel file (delivered
+          out-of-band; ConPTY strips sixel through the shell, so use this to display one)
+        - `wagtermctl image frameshm <Local\wagterm-frame-NAME> [--slot N] [--seq N] ...` — display
+          a high-rate raw BGRA/RGBA frame from a versioned shared-memory mapping. This is a specialized
+          producer path; query `wagtermctl session metrics [<pane-id>] --json` before sizing it and
+          follow https://github.com/msize/wagterm/blob/main/docs/specs/image-frameshm.md for the
+          versioned contract. Ordinary image files should use `image show`.
+        Note: Windows ConPTY strips inline terminal-graphics sequences, so images MUST be delivered
+        through this control channel — not by printing escape codes to stdout.
+
+        ## If wagtermctl is not on PATH
+        Send one JSON line to the pipe named by `%WAGTERM_PIPE%` (default `wagterm`), e.g. in PowerShell:
+        ```
+        $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', $env:WAGTERM_PIPE, 'InOut')
+        $c.Connect(2000); $w = New-Object System.IO.StreamWriter($c); $w.AutoFlush=$true
+        $w.WriteLine('{"cmd":"session.status","target":"' + $env:WAGTERM_SESSION_ID + '","args":{"status":"active"}}')
+        ```
+        Request shape: `{"cmd":"<area>.<command>","target":"<id|prefix|active>","args":{...}}`.
+        Response: `{"ok":true,"result":...}` or `{"ok":false,"error":"..."}`.
+        """;
+
+    public static string Install()
+    {
+        int written = 0;
+        foreach (var baseDir in new[] { Path.Combine(Home, ".claude"), Path.Combine(Home, ".codex") })
+        {
+            try
+            {
+                string dir = Path.Combine(baseDir, "skills", "wagterm");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, "SKILL.md"), SkillMarkdown);
+                written++;
+            }
+            catch { /* skip a tool that isn't present */ }
+        }
+        return $"installed agent skill to {written} location(s) (~/.claude/skills/wagterm, ~/.codex/skills/wagterm)";
+    }
+}

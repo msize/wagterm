@@ -45,12 +45,12 @@ jobs:
           global-json-file: global.json
 
       - name: Restore
-        run: dotnet restore Agwinterm.slnx
+        run: dotnet restore Wagterm.slnx
 
       - name: Build
-        run: dotnet build Agwinterm.slnx -c Release --no-restore
+        run: dotnet build Wagterm.slnx -c Release --no-restore
 
-      - name: Check agwinterm-core ABI agreement
+      - name: Check wagterm-core ABI agreement
         # The C ABI is declared three times (Rust const, C# RequiredAbi, lite kRequiredAbi) and a
         # drift is otherwise only caught at load, by whoever runs the mismatched pair. Cheap to
         # check, and it becomes the cross-repo gate once agliteterm ships from its own repository.
@@ -64,7 +64,7 @@ jobs:
         run: cargo build --release --manifest-path native/Cargo.toml
 
       - name: Host resize transaction regressions (no child processes)
-        run: cargo test --manifest-path native/agwinterm-ptyhost/Cargo.toml resize::tests
+        run: cargo test --manifest-path native/wagterm-ptyhost/Cargo.toml resize::tests
 
       # The control API is a cross-product contract now: agliteterm ships from its own repository
       # promising to speak this dialect, and its CI runs THIS spec against its own client. Running
@@ -139,7 +139,7 @@ jobs:
         run: |
           function Invoke-Tests {
             if (Test-Path out.txt) { Remove-Item out.txt, err.txt -ErrorAction SilentlyContinue }
-            $p = Start-Process dotnet -ArgumentList 'test','Agwinterm.slnx','-c','Release','--no-build','--logger','"console;verbosity=normal"' `
+            $p = Start-Process dotnet -ArgumentList 'test','Wagterm.slnx','-c','Release','--no-build','--logger','"console;verbosity=normal"' `
                  -NoNewWindow -PassThru -RedirectStandardOutput out.txt -RedirectStandardError err.txt
             if (-not $p.WaitForExit(360000)) {   # 6 min: the suite is ~30s, so this only trips on a deadlock
               try { $p.Kill($true) } catch {}

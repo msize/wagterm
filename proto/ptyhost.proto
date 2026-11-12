@@ -1,4 +1,4 @@
-// The agwinterm pty-host protocol, v2 (protobuf wire; v1 was newline-JSON —
+// The wagterm pty-host protocol, v2 (protobuf wire; v1 was newline-JSON —
 // removed by decision on #134: schema-driven codegen beats hand-parsed JSON,
 // especially for the C++ lite client).
 //
@@ -13,9 +13,9 @@
 
 syntax = "proto3";
 
-package agwinterm.ptyhost;
+package wagterm.ptyhost;
 
-option csharp_namespace = "Agwinterm.Pty.Proto";
+option csharp_namespace = "Wagterm.Pty.Proto";
 
 message Request {
   oneof cmd {
@@ -117,7 +117,7 @@ message AttachReply {
   int32 exit_code = 6;
   string modes = 7;               // synthesized VT reproducing mode state (DumpModes)
   repeated string scrollback = 8; // plain-text history rows, oldest first (back-compat / lite)
-  // Full-fidelity attributed scrollback: a serialized agwinterm.persist.PBuffer of the HISTORY
+  // Full-fidelity attributed scrollback: a serialized wagterm.persist.PBuffer of the HISTORY
   // rows (colours + styles). When present the client seeds from this instead of the plain text,
   // so a reattached view is not dim-until-repaint. Empty when the host can't produce it (a Rust
   // host without persist support yet); the client falls back to `scrollback`.

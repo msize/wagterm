@@ -1,6 +1,6 @@
 # Dedicated P13 fixture: private app-data, no clipboard/registry writes, exact owned job teardown.
-param([string]$Exe="$PSScriptRoot/../../src/Agwinterm.Win32/bin/x64/Release/net10.0-windows/win-x64/Agwinterm.Win32.exe",
-      [string]$TokenOwner=$env:AGWINTERM_TEST_OWNER,[switch]$Strict,
+param([string]$Exe="$PSScriptRoot/../../src/Wagterm.Win32/bin/x64/Release/net10.0-windows/win-x64/wagterm.exe",
+      [string]$TokenOwner=$env:WAGTERM_TEST_OWNER,[switch]$Strict,
       [ValidateSet('Hud','Quick','Navigation','Picker','Accessibility','Command','Menu')][string]$Suite='Hud')
 $ErrorActionPreference='Stop'
 $PSNativeCommandUseErrorActionPreference=$false
@@ -128,17 +128,17 @@ public sealed class HudOwnedJob {
 }
 '@
     $pipe='p13-'+[guid]::NewGuid().ToString('N')
-    $appId='agwinterm-'+$run
+    $appId='wagterm-'+$run
     $appDir=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) $appId
     if(Test-Path -LiteralPath $appDir){throw 'Private app directory already exists'}
     New-Item -ItemType Directory $appDir|Out-Null
     # Every pane uses a harmless cmd /d shell: never the user's PowerShell profile or agent hooks.
     @{default='HUD-test';profiles=@(@{name='HUD-test';command='cmd.exe';args=@('/d');cwd=$artifact})}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $appDir 'profiles.json')
-    @('session-host = in-process','claude-update-check = false','update-check = false','fresh-env = false','copy-on-select = false')|Set-Content (Join-Path $appDir 'agwinterm.conf')
+    @('session-host = in-process','claude-update-check = false','update-check = false','fresh-env = false','copy-on-select = false')|Set-Content (Join-Path $appDir 'wagterm.conf')
     'map f12 = close_pane'|Set-Content (Join-Path $appDir 'keymap.conf')
     if($Suite-eq 'Quick'){
         @('map f7 = toggle_search','map f8 = command:QuickProbe',
-          ('command [send] QuickProbe = echo {AGW_PANE}>"'+(Join-Path $artifact 'keymap-send.txt')+'"'))|Add-Content (Join-Path $appDir 'keymap.conf')
+          ('command [send] QuickProbe = echo {WAG_PANE}>"'+(Join-Path $artifact 'keymap-send.txt')+'"'))|Add-Content (Join-Path $appDir 'keymap.conf')
     }
     if($Suite-eq 'Menu'){
         # A bound Alt+letter runs its binding, and the same chord as a leader follow-up runs the leader's
@@ -151,11 +151,11 @@ public sealed class HudOwnedJob {
           'leader = f10','map leader a | b = next_workspace')|Add-Content (Join-Path $appDir 'keymap.conf')
     }
     $savedEnv=@{}
-    foreach($name in 'AGWINTERM_APP_ID','AGWINTERM_PIPE','AGWINTERM_SESSION_ID','AGWINTERM_PANE_ID','AGWINTERM_DUMP','AGWINTERM_PERF','AGWINTERM_IMGLOG'){
+    foreach($name in 'WAGTERM_APP_ID','WAGTERM_PIPE','WAGTERM_SESSION_ID','WAGTERM_PANE_ID','WAGTERM_DUMP','WAGTERM_PERF','WAGTERM_IMGLOG'){
         $savedEnv[$name]=[Environment]::GetEnvironmentVariable($name)
         [Environment]::SetEnvironmentVariable($name,$null)
     }
-    $env:AGWINTERM_APP_ID=$appId+'-fallback'
+    $env:WAGTERM_APP_ID=$appId+'-fallback'
     $job=[HudOwnedJob]::new()
     $job.Start([IO.Path]::GetFullPath($Exe),"--app-id $appId --pipe $pipe --no-restore",$root)
     function Rpc([string]$verb,$params=@{},[string]$target='active',[switch]$AllowError,[string]$Window='active',[switch]$NoTarget){
@@ -209,7 +209,7 @@ public sealed class HudOwnedJob {
     }
     elseif($Suite-eq 'Command') {
         $commandArtifact=$artifact;$commandPipe=$pipe
-        $commandCtl=Join-Path $root 'src/Agwinterm.Ctl/bin/Release/net10.0-windows/agwintermctl.exe'
+        $commandCtl=Join-Path $root 'src/Wagterm.Ctl/bin/Release/net10.0-windows/wagtermctl.exe'
         function CommandRpc([string]$verb,$params,[string]$target,[switch]$AllowError){
             Rpc $verb $params $target -AllowError:$AllowError
         }
@@ -220,7 +220,7 @@ public sealed class HudOwnedJob {
     elseif($Suite-eq 'Menu') { . "$PSScriptRoot/menu-bar-ui-cases.ps1" }
     elseif($Suite-eq 'Navigation') { . "$PSScriptRoot/navigation-ui-cases.ps1" }
     elseif($Suite-eq 'Quick') { . "$PSScriptRoot/quick-ui-cases.ps1" } else {
-    $ctl=Join-Path $root 'src/Agwinterm.Ctl/bin/Release/net10.0-windows/agwintermctl.exe'
+    $ctl=Join-Path $root 'src/Wagterm.Ctl/bin/Release/net10.0-windows/wagtermctl.exe'
     $null=& $ctl session hud --spinner 'CLI HUD' --detail 'private acceptance' --size-percent 35 --target $session --pipe $pipe --json
     Check 'CLI default open accepts spinner before message and numeric width' ($LASTEXITCODE-eq 0 -and (Node).hud.message-eq 'CLI HUD' -and (Node).hud.sizePercent-eq 35)
     foreach($selector in 'target','window'){

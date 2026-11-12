@@ -1,0 +1,85 @@
+using System.IO;
+
+namespace Wagterm.Pty;
+
+/// <summary>
+/// Installs a generic, agent-agnostic status bridge into the user's PowerShell profile, for agents
+/// that lack native hooks (unlike Claude Code, which uses <see cref="AgentHooks"/>). Appends a guarded,
+/// sentinel-delimited block to the END of the CurrentUser powershell.exe profile that — only inside an
+/// wagterm session ($env:WAGTERM) — watches for commands whose name matches $env:WAGTERM_AGENT_RE
+/// (a regex; a sensible default is seeded). When such a command is submitted it pushes status "active";
+/// when it finishes (detected at the next prompt) it pushes "completed". Idempotent.
+/// </summary>
+public static class GenericAgentInstaller
+{
+    private const string Begin = "# >>> wagterm generic agent status >>>";
+    private const string End = "# <<< wagterm generic agent status <<<";
+
+    /// <summary>The guarded block appended to $PROFILE. Wraps the prompt + a PSReadLine Enter handler.</summary>
+    public static readonly string Block =
+        Begin + "\n" +
+        """
+        if ($env:WAGTERM -eq '1' -and -not $global:__wagAgent) {
+          $global:__wagAgent = $true
+          if (-not $env:WAGTERM_AGENT_RE) { $env:WAGTERM_AGENT_RE = 'claude|codex|devin|aider|gemini|cursor|copilot|goose|opencode|amp|pi' }
+          function global:__wagStatus([string]$s) {
+            if (-not $env:WAGTERM_SESSION_ID) { return }
+            $pipe = if ($env:WAGTERM_PIPE) { $env:WAGTERM_PIPE } else { 'wagterm' }
+            try {
+              $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', $pipe, [System.IO.Pipes.PipeDirection]::InOut)
+              $c.Connect(300)
+              $w = New-Object System.IO.StreamWriter($c); $w.AutoFlush = $true
+              $w.WriteLine('{"cmd":"session.status","target":"' + $env:WAGTERM_SESSION_ID + '","args":{"status":"' + $s + '"}}')
+              $c.Dispose()
+            } catch { }
+          }
+          if (Get-Module -ListAvailable PSReadLine) {
+            Set-PSReadLineKeyHandler -Key Enter -ScriptBlock {
+              $line = $null; $cur = $null
+              [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cur)
+              if ($line -and $line -match ('^\s*(' + $env:WAGTERM_AGENT_RE + ')\b')) { __wagStatus 'active' }
+              [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+            }
+            $global:__wagAgentPrompt = $function:prompt
+            function global:prompt {
+              $h = Get-History -Count 1
+              if ($h -and $h.CommandLine -match ('^\s*(' + $env:WAGTERM_AGENT_RE + ')\b') -and $h.Id -ne $global:__wagLastH) {
+                $global:__wagLastH = $h.Id; __wagStatus 'completed'
+              }
+              if ($global:__wagAgentPrompt) { & $global:__wagAgentPrompt } else { "PS $((Get-Location).Path)> " }
+            }
+          }
+        }
+        """ + "\n" + End;
+
+    /// <summary>Append the block to the profile if not already present; replace an installed block whose
+    /// content is stale (older bridge version — e.g. before pi joined the default agent regex). Idempotent.</summary>
+    public static string Install()
+    {
+        string path = ShellIntegrationInstaller.ProfilePath();
+        try
+        {
+            string existing = File.Exists(path) ? File.ReadAllText(path) : "";
+            switch (ProfileBlocks.Inspect(existing, Begin, End, Block, out string updated))
+            {
+                case ProfileBlockState.Current: return "generic agent status already installed -> " + path;
+                case ProfileBlockState.Corrupted: return "generic agent block is corrupted (no end sentinel) — fix " + path + " by hand";
+                case ProfileBlockState.Stale:
+                    File.WriteAllText(path, updated);
+                    return "updated generic agent status to the current version -> " + path;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            string sep = existing.Length == 0 ? "" : (existing.EndsWith("\n") ? "\n" : "\n\n");
+            File.AppendAllText(path, sep + Block + "\n");
+            return "installed generic agent status (regex $env:WAGTERM_AGENT_RE) -> " + path;
+        }
+        catch (Exception ex)
+        {
+            return "failed to install generic agent status: " + ex.Message;
+        }
+    }
+
+    /// <summary>Refresh an already-installed block at startup (never installs fresh).</summary>
+    public static string? RefreshIfInstalled() => ProfileBlocks.RefreshIfInstalled(Begin, End, Block, "generic agent bridge");
+}

@@ -1,19 +1,19 @@
 # Project conventions
 
-agwinterm is a Windows terminal for AI coding agents, built on .NET with a
+wagterm is a Windows terminal for AI coding agents, built on .NET with a
 native layer beside it (`native/`). The lite product moved to its own repository
 (agliteterm) at 0.17.5; `lite/` holds only the frozen handover installer.
 
 ## Build and test
 
 ```bash
-dotnet build Agwinterm.slnx -c Release
-dotnet test Agwinterm.slnx -c Release
+dotnet build Wagterm.slnx -c Release
+dotnet test Wagterm.slnx -c Release
 ```
 
 `native/` builds separately (`cargo build --release`, `cargo test`). The core C
-ABI is declared by `ABI_VERSION` in `native/agwinterm-core/src/lib.rs` and
-`RequiredAbi` in `src/Agwinterm.Core/RustEmulatorCore.cs`; they must agree.
+ABI is declared by `ABI_VERSION` in `native/wagterm-core/src/lib.rs` and
+`RequiredAbi` in `src/Wagterm.Core/RustEmulatorCore.cs`; they must agree.
 
 ## Review bar
 

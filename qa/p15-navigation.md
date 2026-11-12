@@ -47,7 +47,7 @@ One pre-existing Major and two Immaterials; no open questions.
 - Immaterials left unchanged: duplicate-but-equal cursor grammar and redundant target
   check. Neither changes execution; no extra polish round is warranted.
 
-Initial candidate passed [CI 34365129644](https://github.com/yeroo/agwinterm/actions/runs/34365129644):
+Initial candidate passed [CI 34365129644](https://github.com/msize/wagterm/actions/runs/34365129644):
 conformance, clipboard/paste, Win32, HUD 51, quick 57, navigation 44, Core 296/Pty 774.
 Fix batch: Release build passed; Core 297/Pty 774 passed; private navigation **51/51**.
 Artifact `.revmux/navigation-ui-20260909T180805-03bb23`, token 113 released after zero

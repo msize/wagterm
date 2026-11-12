@@ -34,7 +34,7 @@ public static class MenuBarNative {
  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vk);
  // The modifiers held on the REAL keyboard (read only): the app's chord checks read Ctrl / Shift from GetKeyState, which a desktop user typing during the run can set.
  public static string HeldMods(){var m=new List<string>();if(GetAsyncKeyState(0x10)<0)m.Add("shift");if(GetAsyncKeyState(0x11)<0)m.Add("ctrl");if(GetAsyncKeyState(0x12)<0)m.Add("alt");return m.Count>0?string.Join("+",m):"none";}
- public static IntPtr[] Popups(uint pid){var found=new List<IntPtr>();EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid&&IsWindowVisible(h)){var cls=new StringBuilder(256);GetClassNameW(h,cls,256);if(cls.ToString()=="agwinterm-menu")found.Add(h);}return true;},IntPtr.Zero);return found.ToArray();}
+ public static IntPtr[] Popups(uint pid){var found=new List<IntPtr>();EnumWindows((h,p)=>{uint n;GetWindowThreadProcessId(h,out n);if(n==pid&&IsWindowVisible(h)){var cls=new StringBuilder(256);GetClassNameW(h,cls,256);if(cls.ToString()=="wagterm-menu")found.Add(h);}return true;},IntPtr.Zero);return found.ToArray();}
 }
 '@ }
 function MenuWait([scriptblock]$condition,[int]$tries=60){for($i=0;$i-lt $tries;$i++){if(& $condition){return $true};Start-Sleep -Milliseconds 100};return $false}
@@ -65,7 +65,7 @@ function ShotWindow([IntPtr]$h,[string]$name){
 $expectedFile=@('New Window','Open Window','Rename Window…','Delete Window','New Workspace','Rename Workspace','Delete Workspace',
     'New Session','Open Directory…','Open Recent','Reopen Last Closed Item','Rename Session','Duplicate Session',
     'Session Link','Reveal in Explorer',
-    'Close Session','Reopen Closed Item','Clear Status','Edit Keymap…','Reload Keymap','Edit agwinterm.conf…','Reload Config')
+    'Close Session','Reopen Closed Item','Clear Status','Edit Keymap…','Reload Keymap','Edit wagterm.conf…','Reload Config')
 
 # ---- The bar itself, through UIA.
 $bar=MenuBar
@@ -114,7 +114,7 @@ Check 'and changes nothing in the tree' (((Rpc 'tree')|ConvertTo-Json -Depth 8 -
 # GetCursorPos routing the real pointer would be anywhere but there, and this could not pass.
 function PopupPoint([IntPtr]$popup,[double]$sx,[double]$sy){ $r=[MenuBarNative+RECT]::new();[void][MenuBarNative]::GetWindowRect($popup,[ref]$r); $cx=[int]($sx-$r.left);$cy=[int]($sy-$r.top); [IntPtr](([int64]($cy -band 0xFFFF) -shl 16) -bor ($cx -band 0xFFFF)) }
 Invoke-Element (BarLabel 'Help')
-Check 'Invoke on Help drops its menu' (MenuWait {$null-ne (Row 'Help' 'About agwinterm')})
+        Check 'Invoke on Help drops its menu' (MenuWait {$null-ne (Row 'Help' 'About WagTerm')})
 $popups=@([MenuBarNative]::Popups($job.Pid))
 $navBox=(BarLabel 'Navigate').Current.BoundingRectangle
 if($popups.Count-ge 1){ [void][MenuBarNative]::PostMessageW($popups[0],0x201,[IntPtr]1,(PopupPoint $popups[0] ($navBox.X+$navBox.Width/2) ($navBox.Y+$navBox.Height/2))) }
@@ -294,7 +294,7 @@ $paneBefore=([string](Rpc 'session.text' @{})).TrimEnd()
 AltTap; Key $VK_RIGHT; Key $VK_RIGHT; Key $VK_RIGHT
 Check 'Help is focused after three Rights' (MenuWait {Focused 'Help'})
 Key $VK_RETURN
-Check 'Enter opens the Help menu' (MenuWait {$null-ne (Row 'Help' 'About agwinterm')})
+    Check 'Enter opens the Help menu' (MenuWait {$null-ne (Row 'Help' 'About WagTerm')})
 Key 0x23   # End
 PostKey $WM_KEYDOWN $VK_RETURN 0x001C0001; PostKey 0x102 0x0D 0x001C0001; PostKey $WM_KEYUP $VK_RETURN 0xC01C0001   # Enter, with the WM_CHAR TranslateMessage would queue
 Check 'Enter on About opens the About dialog' (MenuWait {@([MenuBarNative]::Dialogs($job.Pid)).Count-eq 1})
@@ -304,9 +304,9 @@ Start-Sleep -Milliseconds 300
 $paneAfter=([string](Rpc 'session.text' @{})).TrimEnd()
 Check 'the Enter that ran About did not reach the pane' ($paneAfter-eq $paneBefore) "before=…$($paneBefore.Substring([Math]::Max(0,$paneBefore.Length-40))) after=…$($paneAfter.Substring([Math]::Max(0,$paneAfter.Length-40)))"
 
-# ---- The file is the truth: a key edited by hand in agwinterm.conf is applied by the next `config set` of ANOTHER
+# ---- The file is the truth: a key edited by hand in wagterm.conf is applied by the next `config set` of ANOTHER
 # key (it re-reads the file), and by File ▸ Reload Config — with the same steps a set applies (the cell grows).
-$conf=Join-Path $appDir 'agwinterm.conf'
+$conf=Join-Path $appDir 'wagterm.conf'
 function Set-ConfLine([string]$key,[string]$value){ $kept=@(Get-Content $conf | Where-Object { $_ -notmatch ('^\s*'+[regex]::Escape($key)+'\s*=') }); Set-Content $conf ($kept + ($key+' = '+$value)) }   # one line per key: the parser keeps the FIRST
 $fontBefore=[regex]::Match([string](Rpc 'config.get' @{key='font-size'} -NoTarget),'(\d+(\.\d+)?)\s*$').Groups[1].Value
 $cellBefore=[double](Rpc 'session.metrics' @{} $session).cellHeight

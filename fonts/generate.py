@@ -2,7 +2,7 @@
 """AGWin Bitmap font-pack generator.
 
 Rasterizes the pinned JetBrainsMono Nerd Font Mono at build time into compact
-versioned binary packs (.agbf) at 14/16/18/20 px cell heights, so agwinterm-lite
+versioned binary packs (.agbf) at 14/16/18/20 px cell heights, so wagterm-lite
 can render bitmap text without touching vector fonts at runtime.
 
 Box drawing (U+2500-257F), block elements (U+2580-259F) and the solid Powerline

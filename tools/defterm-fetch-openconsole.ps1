@@ -1,9 +1,9 @@
 # defterm-fetch-openconsole.ps1 — download OpenConsole.exe + OpenConsoleProxy.dll (MIT, from the
-# Windows Terminal release) into the agwinterm build dir. These are required for the default-terminal
+# Windows Terminal release) into the wagterm build dir. These are required for the default-terminal
 # handoff: OpenConsole is the console delegate, OpenConsoleProxy marshals the handoff HANDLEs.
 
 param(
-    [string]$BuildDir = "$PSScriptRoot\..\src\Agwinterm.Win32\bin\Debug\net10.0-windows\win-x64",
+    [string]$BuildDir = "$PSScriptRoot\..\src\Wagterm.Win32\bin\Debug\net10.0-windows\win-x64",
     [string]$Version  = '1.24.11321.0'
 )
 $ErrorActionPreference = 'Stop'

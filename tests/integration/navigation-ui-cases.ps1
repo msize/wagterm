@@ -200,7 +200,7 @@ Check 'flagged mode refuses workspace navigation' (-not (Rpc 'workspace.go' @{to
 $null=Rpc 'sidebar' @{op='mode:tree'}
 Check 'explicit target refuses without moving' (-not (Rpc 'workspace.go' @{to='next'} $first -AllowError).ok -and (CurrentWs)-eq $second)
 Check 'quick window refuses library navigation' (-not (Rpc 'workspace.go' @{to='next'} -NoTarget -Window quick -AllowError).ok)
-$ctl=Join-Path $root 'src/Agwinterm.Ctl/bin/Release/net10.0-windows/agwintermctl.exe'
+$ctl=Join-Path $root 'src/Wagterm.Ctl/bin/Release/net10.0-windows/wagtermctl.exe'
 $cli=& $ctl workspace go --to next --pipe $pipe --window active
 Check 'CLI --to routes to workspace go' ($LASTEXITCODE-eq 0 -and ([string]$cli).Trim()-eq $first)
 $cli=& $ctl workspace go prev --pipe $pipe --window active
@@ -352,7 +352,7 @@ try {
     $null=Rpc 'session.write' @{text=($esc+'[2J'+$esc+'[H'+$esc+'[1mBOLD FALLBACK 0123456789'+$esc+'[0m'+"`r`n"+$esc+'[3mITALIC FALLBACK 0123456789'+$esc+'[0m')} $session
     $styledExpected=NavPixels 'fallback-styled-expected'
     $fallbackMetrics=Rpc 'session.metrics' @{} $session|ConvertTo-Json -Compress
-    $missing='Agwinterm-Missing-'+[guid]::NewGuid().ToString('N')
+    $missing='Wagterm-Missing-'+[guid]::NewGuid().ToString('N')
     $null=Rpc 'config.set' @{key='font-family';value=$missing}
     Check 'missing font uses the installed monospace fallback metrics' ((Rpc 'session.metrics' @{} $session|ConvertTo-Json -Compress)-eq $fallbackMetrics)
     Check 'font fallback preserves the requested preference' ((Rpc 'config.get' @{key='font-family'})-eq $missing)

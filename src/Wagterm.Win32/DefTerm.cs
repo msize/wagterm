@@ -1,0 +1,230 @@
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.Marshalling;
+
+namespace Wagterm.Win32;
+
+/// <summary>
+/// Stage B of Default Terminal delegation (T2-13): the out-of-process COM server that Windows' console
+/// host (conhost/OpenConsole) hands a console session off to. When wagterm is the registered default
+/// terminal, launching any console app makes conhost <c>CoCreateInstance</c> our CLSID and call
+/// <see cref="ITerminalHandoff3.EstablishPtyHandoff"/>; we create the PTY pipes, keep our ends, and hand
+/// them to the app via <see cref="OnHandoff"/> (→ <c>TerminalSession.Attach</c>).
+///
+/// Requires OpenConsoleProxy.dll registered for the interface IIDs (the system_handle marshalling of the
+/// pipe/process handles) — a Stage C packaging task. Modern conhost only ever calls ITerminalHandoff3.
+/// </summary>
+internal static partial class DefTerm
+{
+    /// <summary>wagterm's own DelegationTerminal CLSID (registered under CLSID\{..}\LocalServer32).</summary>
+    internal static readonly Guid Clsid = new("535BFDE8-3412-46E1-B914-4E3FBF824C52");
+
+    /// <summary>Raised (on a COM thread) when conhost hands off a console session. The app wires this to
+    /// create a session and call <c>TerminalSession.Attach</c> on the UI thread.</summary>
+    internal static Action<HandoffArgs>? OnHandoff;
+
+    private static readonly StrategyBasedComWrappers ComWrappers = new();
+    private static uint _cookie;
+
+    /// <summary>Register the class factory so a running wagterm receives handoffs (REGCLS_MULTIPLEUSE).
+    /// Call once at startup on the instance that should own default-terminal handoffs.</summary>
+    internal static void RegisterServer()
+    {
+        if (_cookie != 0) return;
+        var factory = new HandoffFactory();
+        nint unk = ComWrappers.GetOrCreateComInterfaceForObject(factory, CreateComInterfaceFlags.None);
+        try
+        {
+            Guid clsid = Clsid;
+            int hr = CoRegisterClassObject(in clsid, unk, CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, out _cookie);
+            if (hr < 0) _cookie = 0;
+        }
+        finally { Marshal.Release(unk); }
+    }
+
+    internal static void RevokeServer()
+    {
+        if (_cookie != 0) { CoRevokeClassObject(_cookie); _cookie = 0; }
+    }
+
+    internal static nint MakeComObject(object o) => ComWrappers.GetOrCreateComInterfaceForObject(o, CreateComInterfaceFlags.None);
+
+    private static readonly string? LogPath = Environment.GetEnvironmentVariable("WAGTERM_PTYLOG");
+    internal static void Log(string m) { if (LogPath is not null) try { File.AppendAllText(LogPath, $"[defterm] {m}\n"); } catch { } }
+
+    // ---- Default-terminal registration (Settings UI; mirrors tools/defterm-register.ps1) ----
+
+    private const string ClsidOpenConsole = "{2EACA947-7F5F-4CFA-BA87-8F7FBEEFBE69}";  // DelegationConsole
+    private const string ClsidProxy = "{3171DE52-6EFA-4AEF-8A9F-D02BD67E7A4F}";        // OpenConsoleHandoffProxy
+    private const string ZeroGuid = "{00000000-0000-0000-0000-000000000000}";          // "Let Windows decide"
+    private static readonly string[] HandoffIids =                                     // interfaces the proxy marshals
+    {
+        "{E686C757-9A35-4A1C-B3CE-0BCC8B5C69F4}",
+        "{6F23DA90-15C5-4203-9DB0-64E73F1B1B00}",   // ITerminalHandoff3
+        "{746E6BC0-AB05-4E38-AB14-71E86763141F}",
+    };
+
+    /// <summary>Is wagterm currently the OS default terminal (HKCU delegation points at our CLSID)?</summary>
+    internal static bool IsRegisteredDefault()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Console\%%Startup");
+            return string.Equals(k?.GetValue("DelegationTerminal") as string, Clsid.ToString("B"), StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Register wagterm as the Windows default terminal (per-user, no admin): our exe as the
+    /// handoff COM server, OpenConsole as the delegation console, OpenConsoleProxy as the handle-marshalling
+    /// proxy/stub, then point HKCU\Console\%%Startup at them. Returns a status string for the UI.</summary>
+    internal static string RegisterAsDefault()
+    {
+        try
+        {
+            string dir = AppContext.BaseDirectory;
+            string wag = Path.Combine(dir, "wagterm.exe");
+            string oc = Path.Combine(dir, "OpenConsole.exe");
+            string proxy = Path.Combine(dir, "OpenConsoleProxy.dll");
+            if (!File.Exists(oc) || !File.Exists(proxy))
+                return "OpenConsole.exe / OpenConsoleProxy.dll not found next to WagTerm — run tools/defterm-fetch-openconsole.ps1";
+
+            using var classes = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Software\Classes");
+            string us = Clsid.ToString("B").ToUpperInvariant();
+            using (var k = classes.CreateSubKey($@"CLSID\{us}")) k.SetValue(null, "WagTerm default-terminal handoff");
+            using (var k = classes.CreateSubKey($@"CLSID\{us}\LocalServer32")) k.SetValue(null, $"\"{wag}\"");
+            using (var k = classes.CreateSubKey($@"CLSID\{ClsidOpenConsole}")) k.SetValue(null, "OpenConsole");
+            using (var k = classes.CreateSubKey($@"CLSID\{ClsidOpenConsole}\LocalServer32")) k.SetValue(null, $"\"{oc}\"");
+            using (var k = classes.CreateSubKey($@"CLSID\{ClsidProxy}")) k.SetValue(null, "OpenConsoleHandoffProxy");
+            using (var k = classes.CreateSubKey($@"CLSID\{ClsidProxy}\InprocServer32"))
+            { k.SetValue(null, proxy); k.SetValue("ThreadingModel", "Both"); }
+            foreach (var iid in HandoffIids)
+                using (var k = classes.CreateSubKey($@"Interface\{iid}\ProxyStubClsid32")) k.SetValue(null, ClsidProxy);
+
+            using var startup = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Console\%%Startup");
+            startup.SetValue("DelegationConsole", ClsidOpenConsole);
+            startup.SetValue("DelegationTerminal", us);
+            return "WagTerm is now the default terminal";
+        }
+        catch (Exception ex) { return "register failed: " + ex.Message; }
+    }
+
+    /// <summary>Restore the Windows default ("Let Windows decide" = conhost). Mirrors
+    /// tools/defterm-restore-conhost.ps1 — the safety net.</summary>
+    internal static string RestoreWindowsDefault()
+    {
+        try
+        {
+            using var startup = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(@"Console\%%Startup");
+            startup.SetValue("DelegationConsole", ZeroGuid);
+            startup.SetValue("DelegationTerminal", ZeroGuid);
+            return "default terminal restored to Windows (conhost)";
+        }
+        catch (Exception ex) { return "restore failed: " + ex.Message; }
+    }
+
+    /// <summary>Duplicate a marshalled [in] system_handle into this process. COM in-param handles are
+    /// only valid for the DURATION of the call (the stub closes them on return), so anything kept past
+    /// EstablishPtyHandoff must be duplicated synchronously inside it.</summary>
+    internal static nint DupIntoSelf(nint h)
+    {
+        if (h == 0) return 0;
+        nint self = GetCurrentProcess();
+        return DuplicateHandle(self, h, self, out nint dup, 0, false, 2 /* DUPLICATE_SAME_ACCESS */) ? dup : 0;
+    }
+
+    [LibraryImport("kernel32.dll")] private static partial nint GetCurrentProcess();
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool DuplicateHandle(nint srcProc, nint src, nint dstProc, out nint dst, uint access, [MarshalAs(UnmanagedType.Bool)] bool inherit, uint options);
+
+    private const int CLSCTX_LOCAL_SERVER = 0x4;
+    private const int REGCLS_MULTIPLEUSE = 0x1;
+
+    [LibraryImport("ole32.dll")] private static partial int CoRegisterClassObject(in Guid clsid, nint unk, int ctx, int flags, out uint cookie);
+    [LibraryImport("ole32.dll")] private static partial int CoRevokeClassObject(uint cookie);
+    [LibraryImport("kernel32.dll", SetLastError = true)] internal static partial int GetProcessId(nint process);
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static partial bool CreatePipe(out nint read, out nint write, nint sa, int size);
+}
+
+/// <summary>Handles/PID delivered to the app when a console session is handed off. <c>conOut</c> is where
+/// we read the console's VT output; <c>conIn</c> is where we write user input; <c>signal</c> is the
+/// ConPTY signal pipe (resize); <c>client</c> is the console app process (for exit detection).</summary>
+internal readonly record struct HandoffArgs(nint ConOut, nint ConIn, nint Signal, nint Client, int ClientPid, string? Title);
+
+/// <summary>MIDL <c>TERMINAL_STARTUP_INFO</c> — title/icon/show-window for the handed-off session.
+/// BSTR fields are just pointers here; we only peek at the title.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct TerminalStartupInfo
+{
+    public nint pszTitle, pszIconPath;
+    public int iconIndex;
+    public uint dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+    public ushort wShowWindow;
+}
+
+/// <summary>The current default-terminal handoff contract. Only method after IUnknown; the terminal
+/// creates the in/out pipes and returns them ([out] HANDLE*). GUID matches WT's ITerminalHandoff3.</summary>
+[GeneratedComInterface]
+[Guid("6F23DA90-15C5-4203-9DB0-64E73F1B1B00")]
+internal partial interface ITerminalHandoff3
+{
+    void EstablishPtyHandoff(out nint @in, out nint @out, nint signal, nint reference, nint server, nint client, nint startupInfo);
+}
+
+[GeneratedComInterface]
+[Guid("00000001-0000-0000-C000-000000000046")]
+internal partial interface IClassFactory
+{
+    [PreserveSig] int CreateInstance(nint outer, in Guid riid, out nint ppv);
+    [PreserveSig] int LockServer([MarshalAs(UnmanagedType.Bool)] bool fLock);
+}
+
+[GeneratedComClass]
+internal partial class TerminalHandoffImpl : ITerminalHandoff3
+{
+    public void EstablishPtyHandoff(out nint @in, out nint @out, nint signal, nint reference, nint server, nint client, nint startupInfo)
+    {
+        // Terminal creates the PTY pipes (v3). conhost READS user input from *in and WRITES VT to *out;
+        // we keep the opposite ends.
+        DefTerm.CreatePipe(out nint inRead, out nint inWrite, 0, 0);   // *in = inRead (conhost reads); we write inWrite
+        DefTerm.CreatePipe(out nint outRead, out nint outWrite, 0, 0); // *out = outWrite (conhost writes); we read outRead
+        @in = inRead;
+        @out = outWrite;
+        int pid = client != 0 ? DefTerm.GetProcessId(client) : 0;
+        // The stub closes every [in] handle when this call returns, and OnHandoff defers session
+        // creation to the UI thread — duplicate what we keep (signal for resize, client for exit
+        // detection) SYNCHRONOUSLY here, or they're dead by the time the session attaches.
+        nint sigDup = DefTerm.DupIntoSelf(signal);
+        nint clientDup = DefTerm.DupIntoSelf(client);
+        // The startupInfo pointer is call-lifetime too: peek the title now, pass the string.
+        string? title = null;
+        try
+        {
+            if (startupInfo != 0)
+            {
+                var si = Marshal.PtrToStructure<TerminalStartupInfo>(startupInfo);
+                if (si.pszTitle != 0) title = Marshal.PtrToStringBSTR(si.pszTitle);
+            }
+        }
+        catch { }
+        DefTerm.Log($"handoff: signal=0x{signal:X}->0x{sigDup:X} client=0x{client:X}->0x{clientDup:X} pid={pid} title='{title}'");
+        DefTerm.OnHandoff?.Invoke(new HandoffArgs(outRead, inWrite, sigDup, clientDup, pid, title));
+    }
+}
+
+[GeneratedComClass]
+internal partial class HandoffFactory : IClassFactory
+{
+    public int CreateInstance(nint outer, in Guid riid, out nint ppv)
+    {
+        ppv = 0;
+        if (outer != 0) return unchecked((int)0x80040110); // CLASS_E_NOAGGREGATION
+        nint unk = DefTerm.MakeComObject(new TerminalHandoffImpl());
+        try { Guid iid = riid; return Marshal.QueryInterface(unk, in iid, out ppv); }
+        finally { Marshal.Release(unk); }
+    }
+
+    public int LockServer(bool fLock) => 0; // S_OK
+}

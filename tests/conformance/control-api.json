@@ -1,8 +1,8 @@
 {
   "$comment": [
-    "THE CONTROL-API CONTRACT. agliteterm's promise is that it speaks the agwintermctl dialect, and",
+    "THE CONTROL-API CONTRACT. agliteterm's promise is that it speaks the wagtermctl dialect, and",
     "this file is what makes that testable rather than asserted: the same spec runs in BOTH",
-    "repositories' CI — in agwinterm against the full app, here against agliteterm — so a verb",
+    "repositories' CI — in wagterm against the full app, here against agliteterm — so a verb",
     "removed or reshaped on one side fails the other side's build.",
     "",
     "It checks SHAPE by default, with explicit per-step values and CLI exit assertions.",
@@ -22,10 +22,10 @@
     "error": "present when not ok"
   },
   "sessionEnv": [
-    "AGWINTERM_ENABLED",
-    "AGWINTERM_PIPE",
-    "AGWINTERM_SESSION_ID",
-    "AGWINTERM_PANE_ID"
+    "WAGTERM_ENABLED",
+    "WAGTERM_PIPE",
+    "WAGTERM_SESSION_ID",
+    "WAGTERM_PANE_ID"
   ],
   "steps": [
     {
@@ -96,7 +96,7 @@
         "session",
         "name"
       ],
-      "note": "agwinterm #287: a rename names a SESSION, and the reply says WHICH one \u2014 the session the name landed on and the name IN EFFECT, read off the session after the write, the shape session.context ships. It answered the constant \"renamed\" in both products, so a caller that named a PANE (a split pane's id, a cover's id, or just $AGWINTERM_SESSION_ID, which IS a pane id) could not see which session took the name. Widening to the owner is kept and is the right resolution: a pane carries no label of its own, and a bare `session rename` sends the caller's own pane id, so refusing it would refuse the verb's commonest call."
+      "note": "wagterm #287: a rename names a SESSION, and the reply says WHICH one \u2014 the session the name landed on and the name IN EFFECT, read off the session after the write, the shape session.context ships. It answered the constant \"renamed\" in both products, so a caller that named a PANE (a split pane's id, a cover's id, or just $WAGTERM_SESSION_ID, which IS a pane id) could not see which session took the name. Widening to the owner is kept and is the right resolution: a pane carries no label of its own, and a bare `session rename` sends the caller's own pane id, so refusing it would refuse the verb's commonest call."
     },
     {
       "verb": "session.context",
@@ -268,7 +268,7 @@
         "{alpha}"
       ],
       "result": "string",
-      "note": "P6: the selection `selection all` just made, read back through the existing verb without a clipboard write. Shape only: the value is the shell's screen and is not compared, so this does not prove a selection was MADE (a no-op `selected all` followed by an empty copy passes) - that proof is each product's honesty suite (agwinterm win32-control.ps1, lite's UI suite), on a fixture whose content is known."
+      "note": "P6: the selection `selection all` just made, read back through the existing verb without a clipboard write. Shape only: the value is the shell's screen and is not compared, so this does not prove a selection was MADE (a no-op `selected all` followed by an empty copy passes) - that proof is each product's honesty suite (wagterm win32-control.ps1, lite's UI suite), on a fixture whose content is known."
     },
     {
       "verb": "selection.clear",
@@ -783,7 +783,7 @@
     }
   ],
   "$errorsComment": [
-    "Server-side refusals only. agwintermctl rejects some malformed invocations itself (exit 2, no",
+    "Server-side refusals only. wagtermctl rejects some malformed invocations itself (exit 2, no",
     "JSON) — that is the client's behaviour and identical for both products, so it says nothing",
     "about whether the two speak the same dialect."
   ],

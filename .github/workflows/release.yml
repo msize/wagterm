@@ -1,7 +1,7 @@
 name: Release
 
 # Tag a commit (e.g. `git tag v0.2.0 && git push origin v0.2.0`) to build the
-# installer and publish a GitHub Release with agwinterm-setup-<ver>.exe attached.
+# installer and publish a GitHub Release with wagterm-setup-<ver>.exe attached.
 on:
   push:
     tags: [ 'v*' ]
@@ -36,8 +36,8 @@ jobs:
         run: ./installer/build.ps1
 
       # ---- the handover asset, carried forward -----------------------------------------------
-      # agwinterm-lite left this repository, but installs that predate the handover (<= 0.17.3) still
-      # look HERE for an asset whose name starts "agwinterm-lite-setup-". Stop publishing one and they
+      # agwinterm-lite left the upstream repository, but installs that predate the handover (<= 0.17.3) still
+      # look THERE for an asset whose name starts "agwinterm-lite-setup-". Stop publishing one and they
       # go silent forever: the check succeeds, matches nothing, and says nothing — no error, no notice,
       # no route to agliteterm.
       #
@@ -48,6 +48,7 @@ jobs:
       # Delete this step when the pre-0.17.4 population is gone; the release then simply stops carrying
       # it, which is the same silence — by then deliberate.
       - name: Carry the frozen handover asset forward
+        if: github.repository == 'yeroo/agwinterm'
         shell: pwsh
         run: |
           $url = 'https://github.com/${{ github.repository }}/releases/download/v0.17.4/agwinterm-lite-setup-0.17.4.exe'
@@ -71,30 +72,30 @@ jobs:
       - name: Stage native core for consumers
         shell: pwsh
         run: |
-          ./tools/check-abi.ps1 -ManifestOut installer/Output/agwinterm-core-abi.json
-          $abi = (Get-Content installer/Output/agwinterm-core-abi.json | ConvertFrom-Json).abiVersion
-          Copy-Item native/target/release/agwinterm_core.dll     "installer/Output/agwinterm_core-abi$abi.dll"
-          Copy-Item native/target/release/agwinterm-ptyhost.exe  "installer/Output/agwinterm-ptyhost-abi$abi.exe"
+          ./tools/check-abi.ps1 -ManifestOut installer/Output/wagterm-core-abi.json
+          $abi = (Get-Content installer/Output/wagterm-core-abi.json | ConvertFrom-Json).abiVersion
+          Copy-Item native/target/release/wagterm_core.dll     "installer/Output/wagterm_core-abi$abi.dll"
+          Copy-Item native/target/release/wagterm-ptyhost.exe  "installer/Output/wagterm-ptyhost-abi$abi.exe"
 
       # agliteterm ships from its own repository but is driven by the SAME control client — which
-      # is what "speaks the agwintermctl dialect" has to mean if it is to be tested rather than
-      # asserted. Its CI cannot install agwinterm to get one, so the client ships as a release
+      # is what "speaks the wagtermctl dialect" has to mean if it is to be tested rather than
+      # asserted. Its CI cannot install wagterm to get one, so the client ships as a release
       # asset: SELF-CONTAINED single file, so the consuming repo pins no .NET version and the
       # contract is one URL rather than a runtime handshake.
       # Compressed (73 MB -> 37 MB); NOT trimmed — trimming a reflection-using JSON path to save
       # another 20 MB would be a poor trade for the tool that verifies the API contract.
-      - name: Publish agwintermctl for other repositories
+      - name: Publish wagtermctl for other repositories
         shell: pwsh
         run: |
           $v = '${{ github.ref_name }}'
           $v = if ($v -match '^v\d') { $v.TrimStart('v') } else { '0.0.0' }
-          dotnet publish src/Agwinterm.Ctl/Agwinterm.Ctl.csproj -c Release -r win-x64 `
+          dotnet publish src/Wagterm.Ctl/Wagterm.Ctl.csproj -c Release -r win-x64 `
             --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:Version=$v `
             -o ctl-publish
-          Copy-Item ctl-publish/agwintermctl.exe installer/Output/agwintermctl.exe
+          Copy-Item ctl-publish/wagtermctl.exe installer/Output/wagtermctl.exe
 
       # Free, certless supply-chain signing: a Sigstore-backed attestation binding each artifact to
-      # this commit + workflow. Verify with:  gh attestation verify <file> --repo yeroo/agwinterm
+      # this commit + workflow. Verify with:  gh attestation verify <file> --repo msize/wagterm
       # (Doesn't remove SmartScreen — that needs Authenticode, e.g. a SignPath Foundation OSS cert.)
       # The carried-forward handover asset is deliberately NOT in this list: this run did not build
       # those bytes, and attesting them here would claim provenance this workflow cannot vouch for.
@@ -103,24 +104,23 @@ jobs:
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: |
-            installer/Output/agwinterm-setup-*.exe
-            installer/Output/agwinterm-portable-*.exe
-            installer/Output/agwintermctl.exe
-            installer/Output/agwinterm_core-abi*.dll
-            installer/Output/agwinterm-ptyhost-abi*.exe
-            installer/Output/agwinterm-core-abi.json
+            installer/Output/wagterm-setup-*.exe
+            installer/Output/wagterm-portable-*.exe
+            installer/Output/wagtermctl.exe
+            installer/Output/wagterm_core-abi*.dll
+            installer/Output/wagterm-ptyhost-abi*.exe
+            installer/Output/wagterm-core-abi.json
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            installer/Output/agwinterm-setup-*.exe
-            installer/Output/agwinterm-lite-setup-0.17.4.exe
-            installer/Output/agwinterm-portable-*.exe
-            installer/Output/agwintermctl.exe
-            installer/Output/agwinterm_core-abi*.dll
-            installer/Output/agwinterm-ptyhost-abi*.exe
-            installer/Output/agwinterm-core-abi.json
+            installer/Output/wagterm-setup-*.exe
+            installer/Output/wagterm-portable-*.exe
+            installer/Output/wagtermctl.exe
+            installer/Output/wagterm_core-abi*.dll
+            installer/Output/wagterm-ptyhost-abi*.exe
+            installer/Output/wagterm-core-abi.json
           generate_release_notes: true
           fail_on_unmatched_files: true    # every one is a hard build product now — a missing one is a broken release
 
@@ -210,16 +210,16 @@ jobs:
           # lacks. Best-effort: a fresh fork (or none yet) must not fail the release.
           $owner = '${{ github.repository_owner }}'
           try {
-            $h = @{ Authorization = "token $env:WINGET_TOKEN"; 'User-Agent' = 'agwinterm-release'; Accept = 'application/vnd.github+json' }
+            $h = @{ Authorization = "token $env:WINGET_TOKEN"; 'User-Agent' = 'wagterm-release'; Accept = 'application/vnd.github+json' }
             $r = Invoke-RestMethod -Method Post -Headers $h -Uri "https://api.github.com/repos/$owner/winget-pkgs/merge-upstream" -Body (@{ branch = 'master' } | ConvertTo-Json)
             Write-Host "fork sync: $($r.message)"
           } catch { Write-Warning "fork sync skipped: $($_.Exception.Message)" }
           $version = '${{ github.ref_name }}'.TrimStart('v')
-          $url = "https://github.com/${{ github.repository }}/releases/download/v$version/agwinterm-setup-$version.exe"
+          $url = "https://github.com/${{ github.repository }}/releases/download/v$version/wagterm-setup-$version.exe"
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
           # "|x64" pins the architecture: wingetcreate sniffs the Inno stub as x86 and otherwise
           # can't match the manifest's x64 installer node (this kept winget stuck at 0.10.0).
-          .\wingetcreate.exe update yeroo.agwinterm --version $version --urls "$url|x64" --submit --token $env:WINGET_TOKEN
+          .\wingetcreate.exe update msize.wagterm --version $version --urls "$url|x64" --submit --token $env:WINGET_TOKEN
 
   # Packs and pushes the Chocolatey package to the community feed on each release. Every version
   # then goes through Chocolatey's moderation queue (automated validation + VM install test +
