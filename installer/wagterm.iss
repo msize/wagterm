@@ -2,7 +2,7 @@
 ; Build via installer\build.ps1 (publishes to stage\ then runs ISCC on this file).
 
 #define AppName    "WagTerm"
-#define AppVersion "0.21.0"
+#define AppVersion "0.21.1"
 #define AppExe     "wagterm.exe"
 #define AppPublisher "msize"
 ; The main app defaults new sessions to the Rust pty-host as a first-run seed only (it never

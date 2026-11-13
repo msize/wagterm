@@ -458,19 +458,20 @@ internal partial class Program
         DrawCaption(rt, brush, cw);
     }
 
-    /// <summary>Vector app-mark: cyan terminal chevron + block cursor + green agent-status dot (matches the app icon).</summary>
+    private static Color4 LogoColor(uint rgb) => new(
+        ((rgb >> 16) & 255) / 255f, ((rgb >> 8) & 255) / 255f, (rgb & 255) / 255f, 1f);
+
+    /// <summary>Vector app-mark using the same palette as the generated app icon.</summary>
     private void DrawLogo(ID2D1HwndRenderTarget rt, ID2D1SolidColorBrush brush, float x, float cy)
     {
-        var cyan = new Color4(0x38 / 255f, 0xD7 / 255f, 0xF0 / 255f, 1f);
-        var cyanLt = new Color4(0x8A / 255f, 0xE2 / 255f, 0xF2 / 255f, 1f);
-        var green = new Color4(0x3D / 255f, 0xDC / 255f, 0x84 / 255f, 1f);
-        brush.Color = cyan;
+        brush.Color = LogoColor(BrandPalette.Background);
+        rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(x - 3f, cy - 12f, 24f, 24f), RadiusX = 5.5f, RadiusY = 5.5f }, brush);
+        brush.Color = LogoColor(BrandPalette.Ink);
         float top = cy - 6f, mid = cy, bot = cy + 6f, lx = x + 1f, rx = x + 7f;
         rt.DrawLine(new System.Numerics.Vector2(lx, top), new System.Numerics.Vector2(rx, mid), brush, 2.2f);
         rt.DrawLine(new System.Numerics.Vector2(rx, mid), new System.Numerics.Vector2(lx, bot), brush, 2.2f);
-        brush.Color = cyanLt;
+        brush.Color = LogoColor(BrandPalette.Accent);
         rt.FillRoundedRectangle(new RoundedRectangle { Rect = new Rect(x + 10f, cy + 1f, 7f, 4.5f), RadiusX = 1.5f, RadiusY = 1.5f }, brush);
-        brush.Color = green;
         rt.FillEllipse(new Ellipse(new System.Numerics.Vector2(x + 15.5f, cy - 5f), 2.6f, 2.6f), brush);
     }
 

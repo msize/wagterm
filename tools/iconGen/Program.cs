@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
+using BrandPalette = Wagterm.Core.BrandPalette;
 
 // wagterm app icon generator — three variants.
 //  v1 "signal" : dark chevron + white block cursor + white agent-status dot
@@ -11,9 +12,9 @@ using System.IO;
 //  v3 "gradient": shaded dark chevron + white cursor + small dot
 static class Program
 {
-    static readonly Color Background = Color.FromArgb(255, 0xF9, 0x73, 0x16);
-    static readonly Color Ink = Color.FromArgb(255, 0x1F, 0x29, 0x37);
-    static readonly Color Accent = Color.White;
+    static readonly Color Background = Color.FromArgb(unchecked((int)(0xFF000000u | BrandPalette.Background)));
+    static readonly Color Ink = Color.FromArgb(unchecked((int)(0xFF000000u | BrandPalette.Ink)));
+    static readonly Color Accent = Color.FromArgb(unchecked((int)(0xFF000000u | BrandPalette.Accent)));
 
     static void Main(string[] args)
     {
