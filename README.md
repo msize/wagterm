@@ -43,7 +43,11 @@ A lot of "does it have X?" questions have the same answer: bind X yourself. A `c
 
 The Settings window, on the Agent Status tab, where the status colors and the blocked sound are chosen:
 
-![Settings](docs/img/settings.png)
+![Settings](docs/img/settings-status.png)
+
+shell profiles configuration:
+
+![Settings](docs/img/settings-profiles.png)
 
 </details>
 
