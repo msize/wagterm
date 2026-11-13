@@ -29,8 +29,8 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     Check 'Take() carries every format and the sequence it was read under' ($snap.Formats.Count -eq 4 -and $snap.Sequence -eq $f.Seq -and -not $snap.Unsupported) "names=$($snap.Names) seq=$($snap.Sequence)/$($f.Seq)"
-    $w = $guard::WriteSentinel('agw-paste-1', $snap)
-    Check 'WriteSentinel() → written; the clipboard holds the sentinel with the three formats the close synthesized; Sequence is the number AFTER the close (three past the writer''s open), read under a second open' ($w.State -eq 'written' -and $f.Store.Count -eq 4 -and $U.GetString($f.Store[13]) -eq "agw-paste-1`0" -and $w.Sequence -eq $f.Seq -and $w.Sentinel -eq 'agw-paste-1' -and $w.Detail -like 'generation * (the close moved the sequence * -> *; the sentinel is in)' -and $f.Opens -eq 3 -and -not $f.IsOpen) "$w store=$($f.Names) seq=$($f.Seq)"
+    $w = $guard::WriteSentinel('wag-paste-1', $snap)
+    Check 'WriteSentinel() → written; the clipboard holds the sentinel with the three formats the close synthesized; Sequence is the number AFTER the close (three past the writer''s open), read under a second open' ($w.State -eq 'written' -and $f.Store.Count -eq 4 -and $U.GetString($f.Store[13]) -eq "wag-paste-1`0" -and $w.Sequence -eq $f.Seq -and $w.Sentinel -eq 'wag-paste-1' -and $w.Detail -like 'generation * (the close moved the sequence * -> *; the sentinel is in)' -and $f.Opens -eq 3 -and -not $f.IsOpen) "$w store=$($f.Names) seq=$($f.Seq)"
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'Restore() → restored, and the store holds the snapshot byte for byte' ($r.State -eq 'restored' -and (Same $f $snap)) "$r store=$($f.Names)"
     Check '(the number did not move at that close: every synthesizable format was put explicitly)' ($r.Sequence -eq $f.Seq) "restored-at=$($r.Sequence) now=$($f.Seq)"
@@ -40,16 +40,16 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.FailOpensAfter = 2
-    $w = $guard::WriteSentinel('agw-paste-1b', $snap)
+    $w = $guard::WriteSentinel('wag-paste-1b', $snap)
     $f.FailOpensAfter = 0
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'the second open refused → unverified (the case does not run; the writer''s number, three behind); Restore() proves the sentinel by content → restored' ($w.State -eq 'unverified' -and $w.Detail -like '*could not be reopened*' -and $w.Sequence -eq $r.Sequence - 3 - 5 -and $r.State -eq 'restored' -and (Same $f $snap)) "w=$w r=$r"
     $f = New-Fake
     $snap = $guard::Take()
     $f.FailOpensAfter = 2
-    $w = $guard::WriteSentinel('agw-paste-1c', $snap)
+    $w = $guard::WriteSentinel('wag-paste-1c', $snap)
     $f.FailOpensAfter = 0
-    $f.UserWrites(13, $U.GetBytes("agw-paste-1c`0")); $f.Store[0xC0F3] = [Text.Encoding]::ASCII.GetBytes('theirs')
+    $f.UserWrites(13, $U.GetBytes("wag-paste-1c`0")); $f.Store[0xC0F3] = [Text.Encoding]::ASCII.GetBytes('theirs')
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'a copy carrying the sentinel''s text beside a format the system does not synthesize is not the sentinel → changed' ($r.State -eq 'changed' -and $f.Store.ContainsKey([uint32]0xC0F3)) "$r store=$($f.Names)"
 
@@ -57,13 +57,13 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.UserWrites(13, $U.GetBytes("theirs`0"))
-    $w = $guard::WriteSentinel('agw-paste-2', $snap)
+    $w = $guard::WriteSentinel('wag-paste-2', $snap)
     Check 'a user copy between Take() and WriteSentinel() → changed, their copy untouched' ($w.State -eq 'changed' -and $f.Empties -eq 0 -and $f.Sets -eq 0 -and $U.GetString($f.Store[13]) -eq "theirs`0") "$w empties=$($f.Empties) sets=$($f.Sets)"
 
     # A user copy AFTER the sentinel: the restore keeps theirs.
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-3', $snap)
+    $w = $guard::WriteSentinel('wag-paste-3', $snap)
     $f.UserWrites(13, $U.GetBytes("theirs`0"))
     $sets = $f.Sets
     $r = Invoke-ClipboardRestore $snap $w $null
@@ -73,7 +73,7 @@ try {
     # restores; the sequence the clipboard shows afterwards is the guard's own, never read as a user's.
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-4', $snap)
+    $w = $guard::WriteSentinel('wag-paste-4', $snap)
     $f.SetFailures = 1
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'one Set fails after the empty → retried under the same open → restored, proven' ($r.State -eq 'restored' -and $f.Opens -eq 4 -and (Same $f $snap)) "$r opens=$($f.Opens) store=$($f.Names)"
@@ -82,7 +82,7 @@ try {
     # loop does not retry with the old sequence; the file is kept.
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-5', $snap)
+    $w = $guard::WriteSentinel('wag-paste-5', $snap)
     $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.SetFailures = 100
@@ -90,7 +90,7 @@ try {
     $r = Invoke-ClipboardRestore $snap $w $file
     Check 'every Set fails after the empty → mutated (not changed), one transaction, the file kept' ($r.State -eq 'mutated' -and $f.Opens -eq $opens + 1 -and (Test-Path -LiteralPath $file)) "$r opens=$($f.Opens - $opens)"
     $f2 = New-Fake
-    $snap2 = $guard::Take(); $w2 = $guard::WriteSentinel('agw-paste-5b', $snap2)
+    $snap2 = $guard::Take(); $w2 = $guard::WriteSentinel('wag-paste-5b', $snap2)
     $file2 = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap2.Save($file2)
     $f2.UserWrites(13, $U.GetBytes("theirs`0"))
@@ -109,33 +109,33 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.SetFailures = 1
-    $w = $guard::WriteSentinel('agw-paste-6', $snap)
+    $w = $guard::WriteSentinel('wag-paste-6', $snap)
     Check 'the sentinel Set fails after the empty → put back, the snapshot proven in the store' ($w.State -eq 'put back' -and (Same $f $snap)) "$w store=$($f.Names)"
 
     # The sentinel write fails and so does the put-back: mutated.
     $f = New-Fake
     $snap = $guard::Take()
     $f.SetFailures = 100
-    $w = $guard::WriteSentinel('agw-paste-7', $snap)
+    $w = $guard::WriteSentinel('wag-paste-7', $snap)
     Check 'the sentinel Set and the put-back both fail → mutated' ($w.State -eq 'mutated' -and $f.Store.Count -eq 0) "$w store=$($f.Names)"
 
     # Empty refused: nothing touched → failed.
     $f = New-Fake
     $snap = $guard::Take()
     $f.EmptyFails = $true
-    $w = $guard::WriteSentinel('agw-paste-8', $snap)
+    $w = $guard::WriteSentinel('wag-paste-8', $snap)
     Check 'EmptyClipboard refused before the sentinel → failed, nothing touched' ($w.State -eq 'failed' -and $f.Sets -eq 0 -and (Same $f $snap)) "$w"
     $f.EmptyFails = $false
-    $w = $guard::WriteSentinel('agw-paste-8', $snap)
+    $w = $guard::WriteSentinel('wag-paste-8', $snap)
     $f.EmptyFails = $true
     $r = Invoke-ClipboardRestore $snap $w $null
-    Check 'EmptyClipboard refused on the restore (the sentinel stays) → mutated' ($r.State -eq 'mutated' -and $U.GetString($f.Store[13]) -eq "agw-paste-8`0") "$r"
+    Check 'EmptyClipboard refused on the restore (the sentinel stays) → mutated' ($r.State -eq 'mutated' -and $U.GetString($f.Store[13]) -eq "wag-paste-8`0") "$r"
     # The put-back succeeds but its read-back cannot read every format: mutated (the clipboard is in
     # an unknown state), and the Detail names what was READ before what was not — the same order as
     # every other Detail (round 9 of #256: the put-back proof printed the unreadable format alone).
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-8b', $snap)
+    $w = $guard::WriteSentinel('wag-paste-8b', $snap)
     $f.GetFails = 16
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'the put-back read-back cannot read CF_LOCALE → mutated, its Detail names the text READ before the unreadable format' ($r.State -eq 'mutated' -and $r.Detail -like 'the read-back holds 13=CF_UNICODETEXT`[*`], then format 16 (CF_LOCALE), whose data could not be read*') "$r"
@@ -145,7 +145,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.OpenFails = $true
-    $w = $guard::WriteSentinel('agw-paste-9', $snap)
+    $w = $guard::WriteSentinel('wag-paste-9', $snap)
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'the clipboard cannot be opened → unopened from both, nothing touched' ($w.State -eq 'unopened' -and $r.State -eq 'unopened' -and $f.Sets -eq 0 -and $f.Empties -eq 0) "w=$w r=$r"
     $threw = $false
@@ -158,13 +158,13 @@ try {
     # case passed over a clipboard still holding the sentinel).
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-9b', $snap)
+    $w = $guard::WriteSentinel('wag-paste-9b', $snap)
     $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.OpenFails = $true
     $sets = $f.Sets
     $r = Invoke-ClipboardRestore $snap $w $file
-    Check 'written, then the restore cannot open five times → unopened, the sentinel still in, the file KEPT' ($w.State -eq 'written' -and $r.State -eq 'unopened' -and $r.Detail -like '*5 tries*' -and $f.Sets -eq $sets -and $U.GetString($f.Store[13]) -eq "agw-paste-9b`0" -and (Test-Path -LiteralPath $file)) "w=$w r=$r"
+    Check 'written, then the restore cannot open five times → unopened, the sentinel still in, the file KEPT' ($w.State -eq 'written' -and $r.State -eq 'unopened' -and $r.Detail -like '*5 tries*' -and $f.Sets -eq $sets -and $U.GetString($f.Store[13]) -eq "wag-paste-9b`0" -and (Test-Path -LiteralPath $file)) "w=$w r=$r"
     $f.OpenFails = $false
     $r = Invoke-ClipboardRestore $snap $w $file
     Check 'the same write restores once the clipboard opens again; the file deleted then' ($r.State -eq 'restored' -and (Same $f $snap) -and -not (Test-Path -LiteralPath $file)) "$r"
@@ -176,13 +176,13 @@ try {
     # unverified rather than skipping the case with the sentinel in.
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-10', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10', $snap)
     $file = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-test-" + [guid]::NewGuid().ToString('N') + '.bin')
     $snap.Save($file)
     $f.Seq++; $f.GetFails = 13
     $sets = $f.Sets; $empties = $f.Empties
     $r = Invoke-ClipboardRestore $snap $w $file
-    Check 'the number moved and CF_UNICODETEXT cannot be read → unread (not changed), nothing touched, the file kept' ($w.State -eq 'written' -and $r.State -eq 'unread' -and $r.Detail -like '*could not be read*' -and $f.Sets -eq $sets -and $f.Empties -eq $empties -and $U.GetString($f.Store[13]) -eq "agw-paste-10`0" -and (Test-Path -LiteralPath $file)) "w=$w r=$r"
+    Check 'the number moved and CF_UNICODETEXT cannot be read → unread (not changed), nothing touched, the file kept' ($w.State -eq 'written' -and $r.State -eq 'unread' -and $r.Detail -like '*could not be read*' -and $f.Sets -eq $sets -and $f.Empties -eq $empties -and $U.GetString($f.Store[13]) -eq "wag-paste-10`0" -and (Test-Path -LiteralPath $file)) "w=$w r=$r"
     $f.GetFails = 16
     $r = Invoke-ClipboardRestore $snap $w $file
     Check 'a synthesized format that cannot be read → unread too' ($r.State -eq 'unread' -and (Test-Path -LiteralPath $file)) "$r"
@@ -198,7 +198,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.GetFails = 13
-    $w = $guard::WriteSentinel('agw-paste-10b', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10b', $snap)
     Check 'CF_UNICODETEXT unreadable under the second open → unverified (the case does not run), the inside number' ($w.State -eq 'unverified' -and $w.Detail -like '*could not be read*' -and $w.Sequence -eq $f.Seq - 3) "$w seq=$($f.Seq)"
     $f.GetFails = 0
     $r = Invoke-ClipboardRestore $snap $w $null
@@ -206,7 +206,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.FormatsFail = $true
-    $w = $guard::WriteSentinel('agw-paste-10d', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10d', $snap)
     Check 'the formats cannot be enumerated under the second open → unverified (the case does not run), the inside number' ($w.State -eq 'unverified' -and $w.Detail -like '*could not be enumerated*' -and $w.Sequence -eq $f.Seq - 3) "$w seq=$($f.Seq)"
     $f.FormatsFail = $false
     $r = Invoke-ClipboardRestore $snap $w $null
@@ -221,7 +221,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.FailOpensAfter = 2
-    $w = $guard::WriteSentinel('agw-paste-10e', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10e', $snap)
     $f.FailOpensAfter = 0
     $f.UserWrites(13, $U.GetBytes("theirs`0")); $f.Store[16] = [byte[]](0, 0, 0, 0); $f.GetFails = 16
     $r = Invoke-ClipboardRestore $snap $w $null
@@ -231,7 +231,7 @@ try {
     $f = New-Fake
     $snap = $guard::Take()
     $f.CopyAtSecondOpen = $U.GetBytes("theirs`0"); $f.GetFails = 16
-    $w = $guard::WriteSentinel('agw-paste-10f', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10f', $snap)
     Check 'other text before an unreadable CF_LOCALE under the SECOND open → changed (no paste, not unverified)' ($w.State -eq 'changed' -and $U.GetString($f.Store[13]) -eq "theirs`0") "$w"
     Check '  and its Detail names what was READ before what was not' ($w.Detail -like '*13=CF_UNICODETEXT`[*`], then format 16 (CF_LOCALE), whose data could not be read*') "$w"
     $f.GetFails = 0
@@ -239,20 +239,20 @@ try {
     # image (an Unsupported id), other text, an emptied clipboard.
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-10c', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10c', $snap)
     $f.Seq++; $f.Store[0xC0F3] = [Text.Encoding]::ASCII.GetBytes('theirs'); $f.GetFails = 13
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'a foreign format beside an unreadable CF_UNICODETEXT is positively theirs → changed' ($r.State -eq 'changed' -and $f.Store.ContainsKey([uint32]0xC0F3)) "$r"
     $f.GetFails = 0
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-10d', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10d', $snap)
     $f.UserWrites(2, [byte[]](1, 2, 3))
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'an image copied during the case (CF_BITMAP) is positively theirs → changed, kept' ($r.State -eq 'changed' -and $r.Detail -like '*CF_BITMAP*' -and $f.Store.ContainsKey([uint32]2)) "$r"
     $f = New-Fake
     $snap = $guard::Take()
-    $w = $guard::WriteSentinel('agw-paste-10e', $snap)
+    $w = $guard::WriteSentinel('wag-paste-10e', $snap)
     $f.Store.Clear(); $f.Seq++
     $r = Invoke-ClipboardRestore $snap $w $null
     Check 'an emptied clipboard is positively not ours → changed, nothing written' ($r.State -eq 'changed' -and $f.Store.Count -eq 0) "$r"

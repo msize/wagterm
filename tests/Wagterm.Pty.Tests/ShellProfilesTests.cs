@@ -8,7 +8,7 @@ namespace Wagterm.Pty.Tests;
 /// profile had captured the resolved (version-baked) path.</summary>
 public class ShellProfilesTests : IDisposable
 {
-    private readonly string _dir = Path.Combine(Path.GetTempPath(), "agw-profiles-" + Guid.NewGuid().ToString("N")[..8]);
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "wag-profiles-" + Guid.NewGuid().ToString("N")[..8]);
 
     public ShellProfilesTests() => Directory.CreateDirectory(_dir);
     public void Dispose() { try { Directory.Delete(_dir, true); } catch { } }
@@ -37,7 +37,7 @@ public class ShellProfilesTests : IDisposable
     {
         // Unresolvable bare name → keep the absolute path (an honest error beats a silent swap
         // to something unrelated; the LaunchShell fallback handles the pane-level degrade).
-        string stale = @"C:\definitely\not\here\no-such-shell-agw.exe";
+        string stale = @"C:\definitely\not\here\no-such-shell-wag.exe";
         WriteProfiles(new { Default = "X", Profiles = new[] { new { Name = "X", Command = stale } } });
         var cfg = ShellProfiles.Load(_dir);
         Assert.Equal(stale, Assert.Single(cfg.Profiles, p => p.Name == "X").Command);

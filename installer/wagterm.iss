@@ -6,7 +6,7 @@
 #define AppExe     "wagterm.exe"
 #define AppPublisher "msize"
 ; The main app defaults new sessions to the Rust pty-host as a first-run seed only (it never
-; overrides an existing config). Lite ships from its own installer (wagterm-lite.iss).
+; overrides an existing config).
 #define RustHostArg "--default-session-host server-rust"
 
 [Setup]
@@ -40,9 +40,6 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 Source: "stage\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
-
-; 0.15.0–0.16.0 bundled the lite terminal inside THIS setup; it now ships from its own installer
-; (agwinterm-lite-setup-<ver>.exe). This upstream cleanup is not needed in the isolated wagterm setup.
 
 [Icons]
 ; Main terminal — its shortcut seeds server-rust on a first run (harmless once configured).

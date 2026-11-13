@@ -178,7 +178,7 @@ public class RustPtyHostTests : IDisposable
     /// which is where the host looks for it (#339).</summary>
     private static string BundledHostCopy()
     {
-        string dir = Directory.CreateTempSubdirectory("agw-rusthost-conpty-").FullName;
+        string dir = Directory.CreateTempSubdirectory("wag-rusthost-conpty-").FullName;
         string exe = Path.Combine(dir, "wagterm-ptyhost.exe");
         File.Copy(ExePath!, exe);
         File.Copy(Path.Combine(ConPtyConnectionTests.BundledDir, "conpty.dll"), Path.Combine(dir, "conpty.dll"));

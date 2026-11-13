@@ -23,13 +23,13 @@ function Split-Argv([string]$s) {
 }
 
 "== paste sink (synthetic) =="
-$marker = 'agw-sink-0123abcd'
+$marker = 'wag-sink-0123abcd'
 $launch = New-PasteSinkLaunch $marker
 $argv = Split-Argv $launch.Command
 Check 'the launch is powershell.exe started directly: argv[0] powershell, -NoProfile, -Command, one script — no cmd /c, no -NoExit, no shell to fall back to' ($argv.Count -eq 4 -and $argv[0] -eq 'powershell' -and $argv[1] -eq '-NoProfile' -and $argv[2] -eq '-Command' -and $launch.Command -notmatch '(?i)-NoExit|cmd(\.exe)? /c|\bexit\b') "argv=$($argv -join ' | ')"
 Check 'the sink script prints the ready marker, then reads lines forever and runs none' ($argv[3] -eq "'$marker-ready'; for(;;){ [void](Read-Host) }") "script=$($argv[3])"
 Check 'the command carries no `$` (nothing for a shell to expand, should one ever see it) and no -NonInteractive (Read-Host throws under it)' (-not $launch.Command.Contains('$') -and $launch.Command -notmatch '(?i)-NonInteractive') "command=$($launch.Command)"
-Check 'the ready marker is <marker>-ready' ($launch.Ready -eq 'agw-sink-0123abcd-ready')
+Check 'the ready marker is <marker>-ready' ($launch.Ready -eq 'wag-sink-0123abcd-ready')
 
 # The pane before the sink prints: empty, or only what the app painted.
 Check 'empty pane: NOT ready' (-not (Test-PasteSinkReady '' $launch.Ready) -and -not (Test-PasteSinkReady "`n`n" $launch.Ready))
@@ -39,8 +39,8 @@ $echo = 'PS C:\Users\runneradmin> ' + $launch.Command + "`n"
 Check '(a typed echo of the launch WOULD satisfy the predicate — which is why the sink is started directly, never typed)' (Test-PasteSinkReady $echo $launch.Ready)
 # The sink started: it printed the marker.
 Check 'the printed marker: ready' (Test-PasteSinkReady ($launch.Ready + "`n") $launch.Ready)
-Check 'the printed marker split by a row break (CRLF, a narrow pane): ready — row breaks are ignored' (Test-PasteSinkReady ('agw-sink-0123a' + "`r`n" + 'bcd-ready' + "`n") $launch.Ready)
-Check 'another run''s marker is NOT ready' (-not (Test-PasteSinkReady ('agw-sink-ffffffff-ready' + "`n") $launch.Ready))
+Check 'the printed marker split by a row break (CRLF, a narrow pane): ready — row breaks are ignored' (Test-PasteSinkReady ('wag-sink-0123a' + "`r`n" + 'bcd-ready' + "`n") $launch.Ready)
+Check 'another run''s marker is NOT ready' (-not (Test-PasteSinkReady ('wag-sink-ffffffff-ready' + "`n") $launch.Ready))
 Check 'an empty marker is never ready' (-not (Test-PasteSinkReady ($launch.Ready + "`n") ''))
 
 if ($fail) { "paste sink: $fail FAILED"; exit 1 }

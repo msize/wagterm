@@ -46,7 +46,6 @@ public class BrandingTests
     [Theory]
     [InlineData("AGWINTERM", true)]
     [InlineData("agwinterm_session_id", true)]
-    [InlineData("AGW_CWD", true)]
     [InlineData("WAGTERM_SESSION_ID", false)]
     [InlineData("WAG_CWD", false)]
     [InlineData("PATH", false)]
@@ -60,7 +59,6 @@ public class BrandingTests
         {
             ["AGWINTERM"] = "1",
             ["agwinterm_session_id"] = "upstream-pane",
-            ["AGW_CWD"] = "upstream-directory",
             ["WAGTERM_SESSION_ID"] = "fork-pane",
             ["WAG_CWD"] = "fork-directory",
             ["PATH"] = "user-path",
@@ -73,11 +71,11 @@ public class BrandingTests
     }
 
     [Fact]
-    public void InstallingForkHooksPreservesUpstreamHooks()
+    public void InstallingForkHooksPreservesOtherProductHooks()
     {
-        string upstream = @"C:\profile\agwinterm\agwinterm-agent-status.ps1";
+        string other = @"C:\profile\other-terminal\agent-status.ps1";
         string fork = @"C:\profile\wagterm\wagterm-agent-status.ps1";
-        string existing = AgentHooks.MergeClaudeSettings(null, upstream)!;
+        string existing = AgentHooks.MergeClaudeSettings(null, other)!;
         string merged = AgentHooks.MergeClaudeSettings(existing, fork)!;
         using var json = System.Text.Json.JsonDocument.Parse(merged);
         foreach (var entry in json.RootElement.GetProperty("hooks").EnumerateObject())
@@ -85,20 +83,20 @@ public class BrandingTests
             string[] commands = entry.Value.EnumerateArray()
                 .SelectMany(group => group.GetProperty("hooks").EnumerateArray())
                 .Select(hook => hook.GetProperty("command").GetString()!).ToArray();
-            Assert.Contains(commands, command => command.Contains(upstream));
+            Assert.Contains(commands, command => command.Contains(other));
             Assert.Contains(commands, command => command.Contains(fork));
         }
         Assert.Equal(merged, AgentHooks.MergeClaudeSettings(merged, fork));
     }
 
     [Theory]
-    [InlineData(UpdateChannel.Installed, "agwinterm-setup-1.0.0.exe", "wagterm-setup-1.0.0.exe")]
-    [InlineData(UpdateChannel.Portable, "agwinterm-portable-1.0.0-win-x64.exe", "wagterm-portable-1.0.0-win-x64.exe")]
-    public void UpdaterNeverSelectsUpstreamArtifacts(UpdateChannel channel, string upstream, string fork)
+    [InlineData(UpdateChannel.Installed, "otherterm-setup-1.0.0.exe", "wagterm-setup-1.0.0.exe")]
+    [InlineData(UpdateChannel.Portable, "otherterm-portable-1.0.0-win-x64.exe", "wagterm-portable-1.0.0-win-x64.exe")]
+    public void UpdaterNeverSelectsOtherProductArtifacts(UpdateChannel channel, string other, string fork)
     {
-        var upstreamAsset = new ReleaseAsset(upstream, "unused", null);
-        Assert.Null(AppUpdate.PickAsset(new ReleaseInfo("1.0.0", new[] { upstreamAsset }), channel));
+        var otherAsset = new ReleaseAsset(other, "unused", null);
+        Assert.Null(AppUpdate.PickAsset(new ReleaseInfo("1.0.0", new[] { otherAsset }), channel));
         var forkAsset = new ReleaseAsset(fork, "unused", null);
-        Assert.Same(forkAsset, AppUpdate.PickAsset(new ReleaseInfo("1.0.0", new[] { upstreamAsset, forkAsset }), channel));
+        Assert.Same(forkAsset, AppUpdate.PickAsset(new ReleaseInfo("1.0.0", new[] { otherAsset, forkAsset }), channel));
     }
 }

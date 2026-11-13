@@ -91,7 +91,7 @@ public class ControlServerTests
 
         // Minimal 1x1 PNG.
         byte[] png = OnePixelPng;
-        string file = Path.Combine(Path.GetTempPath(), "agw_ctrl_test.png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_ctrl_test.png");
         File.WriteAllBytes(file, png);
 
         string req = "{\"cmd\":\"image.show\",\"args\":{\"path\":" +
@@ -111,7 +111,7 @@ public class ControlServerTests
     {
         var (server, session) = New();
         byte[] png = OnePixelPng;
-        string file = Path.Combine(Path.GetTempPath(), "agw_ctrl_clear.png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_ctrl_clear.png");
         File.WriteAllBytes(file, png);
         server.Dispatch("{\"cmd\":\"image.show\",\"args\":{\"path\":" + System.Text.Json.JsonSerializer.Serialize(file) + ",\"id\":1}}");
         Assert.Single(session.Emulator.Placements);
@@ -126,7 +126,7 @@ public class ControlServerTests
     {
         var (server, session) = New();
         byte[] png = OnePixelPng;
-        string file = Path.Combine(Path.GetTempPath(), "agw_frame.png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_frame.png");
         File.WriteAllBytes(file, png);
         string pj = System.Text.Json.JsonSerializer.Serialize(file);
 
@@ -154,7 +154,7 @@ public class ControlServerTests
     public void ImageFrame_ACacheHitRetransmitsAfterTheImageIdWasReplacedOutsideTheFrameVerb()
     {
         var (server, session) = New();
-        string file = Path.Combine(Path.GetTempPath(), "agw_frame_replaced_" + Guid.NewGuid().ToString("N") + ".png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_frame_replaced_" + Guid.NewGuid().ToString("N") + ".png");
         File.WriteAllBytes(file, OnePixelPng);
         try
         {
@@ -179,7 +179,7 @@ public class ControlServerTests
     public void ImageFrame_TwoStaleIdsAreBothReReadInTheSingleRetry()
     {
         var (server, session) = New();
-        string file = Path.Combine(Path.GetTempPath(), "agw_frame_twostale_" + Guid.NewGuid().ToString("N") + ".png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_frame_twostale_" + Guid.NewGuid().ToString("N") + ".png");
         File.WriteAllBytes(file, OnePixelPng);
         try
         {
@@ -212,7 +212,7 @@ public class ControlServerTests
     public void ImageFrame_OnlyTheStaleIdIsReReadWhenASiblingIsStillLive()
     {
         var (server, session) = New();
-        string file = Path.Combine(Path.GetTempPath(), "agw_frame_sibling_" + Guid.NewGuid().ToString("N") + ".png");
+        string file = Path.Combine(Path.GetTempPath(), "wag_frame_sibling_" + Guid.NewGuid().ToString("N") + ".png");
         File.WriteAllBytes(file, OnePixelPng);
         try
         {

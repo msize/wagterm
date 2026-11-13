@@ -1,9 +1,6 @@
 # Build the wagterm installer: installer\Output\wagterm-setup-<ver>.exe
 # (Wagterm.Win32 + wagtermctl + the Rust pty-host and core dll).
 #
-# The lite terminal is no longer built here — it became its own product, agliteterm, and ships from
-# github.com/yeroo/agliteterm. Upstream releases carry a frozen agwinterm-lite-setup asset so installs
-# that predate the handover can still find their way across. wagterm does not carry it; see .github/workflows/release.yml.
 # Prereqs: .NET SDK (net10.0-windows) + Inno Setup 6 (ISCC on PATH or the usual locations).
 $ErrorActionPreference = "Stop"
 $here   = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -48,9 +45,7 @@ $coreDll = Join-Path $root "native\target\release\wagterm_core.dll"
 $ptyExe  = Join-Path $root "native\target\release\wagterm-ptyhost.exe"
 Copy-Item $coreDll $stage -Force
 Copy-Item $ptyExe  $stage -Force
-# The app loads the Meslo Nerd Font by name from its exe dir. It used to live in lite/assets and
-# moved to assets/fonts/ when lite left this repository — it is the MAIN app's font too, and a
-# shared file has no business living inside a component that was about to be deleted.
+# The app loads the bundled Meslo Nerd Font by name from its executable directory.
 Copy-Item (Join-Path $root "assets\fonts\MesloLGLDZNerdFont-Regular.ttf") $stage -Force
 Copy-Item (Join-Path $root "assets\fonts\FONT-LICENSE.txt") $stage -Force
 

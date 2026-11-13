@@ -513,7 +513,7 @@ try {
     # the new pane prints its own location. Leaf names only: a long temp path wraps in a half pane.
     # Both markers are split in the typed text, so its echo never satisfies the wait.
     $cwdTag = [guid]::NewGuid().ToString('N').Substring(0, 8)
-    $cwdRoot = Join-Path ([IO.Path]::GetTempPath()) ("agw-split-cwd-$cwdTag")
+    $cwdRoot = Join-Path ([IO.Path]::GetTempPath()) ("wag-split-cwd-$cwdTag")
     $cwdHere = Join-Path $cwdRoot "here-$cwdTag"
     New-Item -ItemType Directory -Force -Path $cwdHere | Out-Null
     $cwdMade = Invoke-Ctl @('session', 'new', '--name', 'split-live-cwd', '--cwd', $cwdRoot, '--no-select')
@@ -1021,7 +1021,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         # Check that only records its failure would not have stopped the pastes. The session is
         # closed at the end of the block. No P6 detail prints the pane's text: the sink echoes what it
         # reads, which in the race is someone else's copy — details carry replies, booleans and lengths.
-        $p6SinkMarker = 'agw-sink-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $p6SinkMarker = 'wag-sink-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
         $p6Launch = New-PasteSinkLaunch $p6SinkMarker
         $p6SinkMade = Invoke-Ctl @('session', 'new', '--name', 'p6-paste-sink', '--command-mode', 'direct', '--command', $p6Launch.Command, '--no-select')
         $p6Sink = if ($p6SinkMade.ok) { [string]$p6SinkMade.result } else { $null }   # the session id: a pane-class target (its one pane)
@@ -1044,8 +1044,8 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         $p6RoName1 = 'session paste <A> --target <read-only sink> is refused "pane is read-only" and A does not reach the pane'
         $p6RoName2 = 'and <B> is `pasted` once read-only is off, and A is STILL absent (the refusal sent nothing, early or late)'
         if ($p6SinkUp) {
-            $p6RoA = 'agw-ro-a-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
-            $p6RoB = 'agw-ro-b-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $p6RoA = 'wag-ro-a-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $p6RoB = 'wag-ro-b-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
             $p6RoRefused = $null; $p6RoText = ''; $p6RoOn = $null
             try {
                 $p6RoOn = Invoke-Ctl @('session', 'readonly', 'on', '--target', $p6Sink)
@@ -1080,7 +1080,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         if ($p6Snap -and -not $p6Snap.Unsupported) { "  clipboard before the paste case: $(@($p6Snap.Formats).Count) format(s): $($p6Snap.Names)" }
         $p6File = Join-Path ([IO.Path]::GetTempPath()) ("wagterm-clipboard-" + [guid]::NewGuid().ToString('N') + '.bin')
         if (-not $p6Why) { try { $p6Snap.Save($p6File) } catch { $p6Why = "the clipboard could not be saved to $p6File`: $($_.Exception.Message)" } }
-        $p6Sentinel = 'agw-paste-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $p6Sentinel = 'wag-paste-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
         $p6Paste = $null; $p6Seen = $false; $p6Text = ''; $p6Write = $null; $p6Restore = $null
         if (-not $p6Why) {
             try {
@@ -1138,7 +1138,7 @@ for ($i = 0; $i -lt 60; $i++) { & '__CTL__' session overlay resize --size-percen
         if ($p6Exited) {
             for ($i = 0; $i -lt 30 -and -not (Get-SessionSnapshot $p6Exited); $i++) { Start-Sleep -Milliseconds 200 }
             for ($i = 0; $i -lt 60; $i++) {
-                $p6ExitPaste = Invoke-Ctl @('session', 'paste', 'agw-exited-' + $i, '--target', $p6Exited)
+                $p6ExitPaste = Invoke-Ctl @('session', 'paste', 'wag-exited-' + $i, '--target', $p6Exited)
                 if ((-not $p6ExitPaste.ok) -and ([string]$p6ExitPaste.error) -eq "the pane's process has exited") { break }
                 Start-Sleep -Milliseconds 250
             }

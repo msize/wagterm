@@ -9,7 +9,7 @@ public class ConPtyConnectionTests
     [Fact]
     public void Resolve_Inbox_WhenAskedOrWhenTheBundledFilesAreMissing()
     {
-        string dir = Directory.CreateTempSubdirectory("agw-conpty-").FullName;
+        string dir = Directory.CreateTempSubdirectory("wag-conpty-").FullName;
         try
         {
             var asked = ConPtyApi.Resolve(bundled: false, dir);

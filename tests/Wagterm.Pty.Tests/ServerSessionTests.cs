@@ -321,7 +321,7 @@ public class ServerSessionTests : IDisposable
     public async Task StartFailure_PaintsTheErrorIntoThePane()
     {
         using var s = _backend.Create(Guid.NewGuid().ToString(), 80, 24);
-        await s.StartAsync("definitely-not-a-real-exe-agw.exe", Array.Empty<string>());
+        await s.StartAsync("definitely-not-a-real-exe-wag.exe", Array.Empty<string>());
         Assert.True(WaitFor(() => s.HasExited, 10000));
         Assert.Equal(1, s.ExitCode);
     }

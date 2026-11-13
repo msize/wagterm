@@ -21,7 +21,7 @@ public class ConPtyGraphicsPassthroughTests
         apc.Add(0x1b);
         apc.Add((byte)'\\');
 
-        string file = Path.Combine(Path.GetTempPath(), "agw_conpty_apc.bin");
+        string file = Path.Combine(Path.GetTempPath(), "wag_conpty_apc.bin");
         File.WriteAllBytes(file, apc.ToArray());
 
         using var session = new TerminalSession(80, 24);
