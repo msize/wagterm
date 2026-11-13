@@ -92,6 +92,7 @@ wagtermctl session split on --axis horizontal --target $sid           # add a st
 wagtermctl session type "git status`n" --target $sid                  # drive a session you are not looking at
 wagtermctl session text --target $sid --lines 10                      # read its terminal back
 wagtermctl session status blocked --target $sid                       # set the sidebar status dot
+wagtermctl session link https://issue.tracker/NNN --target $sid       # attach a URL; Ctrl+Shift+L opens it
 wagtermctl session overlay open "lazygit" --block                     # run a program over the session, get its exit
 wagtermctl tree --json                                                # dump the whole model as JSON
 ```
