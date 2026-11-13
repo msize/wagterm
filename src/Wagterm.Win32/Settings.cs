@@ -894,9 +894,9 @@ internal partial class Program
 
     private void ResetAgentStatusSettings()
     {
-        ConfigSetInternal("status-color-active", "#3C8CFF");
-        ConfigSetInternal("status-color-blocked", "#F0A028");
-        ConfigSetInternal("status-color-completed", "#3CC85A");
+        ConfigSetInternal("status-color-active", "#80FF00");
+        ConfigSetInternal("status-color-blocked", "#FF0000");
+        ConfigSetInternal("status-color-completed", "#0080C0");
         ConfigSetInternal("blocked-sound", "");
         RequestRedraw();
     }

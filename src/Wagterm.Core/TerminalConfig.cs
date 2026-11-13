@@ -222,9 +222,9 @@ public sealed class TerminalConfig
     public bool AttentionButton { get; set; } = true;
 
     /// <summary>Sidebar/bell status-glyph colors (#RRGGBB). Defaults match the built-in dot colors.</summary>
-    public string StatusColorActive { get; set; } = "#3C8CFF";
-    public string StatusColorBlocked { get; set; } = "#F0A028";
-    public string StatusColorCompleted { get; set; } = "#3CC85A";
+    public string StatusColorActive { get; set; } = "#80FF00";
+    public string StatusColorBlocked { get; set; } = "#FF0000";
+    public string StatusColorCompleted { get; set; } = "#0080C0";
 
     /// <summary>Default config file contents (also used to seed the file on first run).</summary>
     public const string DefaultText =
@@ -430,9 +430,9 @@ public sealed class TerminalConfig
         bell = audible
 
         # Agent-status glyph colors (#RRGGBB) for the sidebar dot + title-bar bell.
-        status-color-active = #3C8CFF
-        status-color-blocked = #F0A028
-        status-color-completed = #3CC85A
+        status-color-active = #80FF00
+        status-color-blocked = #FF0000
+        status-color-completed = #0080C0
         """;
 
     public static TerminalConfig Parse(string text)

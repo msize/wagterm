@@ -27,12 +27,12 @@ internal partial class Program
     private Color4 SbActiveText = new(1f, 1f, 1f, 1f);
     private Color4 SbDimText = new(0.60f, 0.63f, 0.67f, 1f);
 
-    // Status-glyph colors are user-configurable (Agent Status settings tab); defaults match the originals.
+    // Status-glyph colors are user-configurable (Agent Status settings tab); fallbacks match config defaults.
     private Color4 StatusDot(AgentStatus s) => s switch
     {
-        AgentStatus.Active => HexColor4(_config.StatusColorActive, new(60 / 255f, 140 / 255f, 255 / 255f, 1f)),
-        AgentStatus.Blocked => HexColor4(_config.StatusColorBlocked, new(240 / 255f, 160 / 255f, 40 / 255f, 1f)),
-        AgentStatus.Completed => HexColor4(_config.StatusColorCompleted, new(60 / 255f, 200 / 255f, 90 / 255f, 1f)),
+        AgentStatus.Active => HexColor4(_config.StatusColorActive, new(128 / 255f, 255 / 255f, 0 / 255f, 1f)),
+        AgentStatus.Blocked => HexColor4(_config.StatusColorBlocked, new(255 / 255f, 0 / 255f, 0 / 255f, 1f)),
+        AgentStatus.Completed => HexColor4(_config.StatusColorCompleted, new(0 / 255f, 128 / 255f, 192 / 255f, 1f)),
         _ => new(90 / 255f, 96 / 255f, 102 / 255f, 1f),
     };
 
