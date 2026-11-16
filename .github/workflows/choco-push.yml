@@ -4,19 +4,18 @@
 # release workflow can't do that: it runs on a tag and checks out the tagged tree, so re-running it
 # would just repackage the files that were rejected. This runs from the DEFAULT branch instead, so
 # packaging fixes land without re-tagging or burning a version number.
-name: Chocolatey push (disabled)
+name: Chocolatey push
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Released version to push, without the leading v (e.g. 0.17.3)'
+        description: 'Released version to push, without the leading v (e.g. 0.21.3)'
         required: true
         type: string
 
 jobs:
   push:
-    if: ${{ false }}
     runs-on: windows-latest
     permissions:
       contents: read
@@ -26,6 +25,7 @@ jobs:
         shell: pwsh
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+          PACKAGE_VERSION: ${{ inputs.version }}
         run: |
           if (-not $env:CHOCO_API_KEY) { throw 'CHOCO_API_KEY secret is not set' }
-          ./packaging/chocolatey/publish.ps1 -Version '${{ inputs.version }}' -ApiKey $env:CHOCO_API_KEY -Repository '${{ github.repository }}'
+          ./packaging/chocolatey/publish.ps1 -Version $env:PACKAGE_VERSION -ApiKey $env:CHOCO_API_KEY -Repository $env:GITHUB_REPOSITORY

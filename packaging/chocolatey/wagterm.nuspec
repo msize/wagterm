@@ -2,15 +2,15 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>wagterm</id>
-    <version>0.10.0</version>
-    <packageSourceUrl>https://github.com/msize/wagterm/tree/main/packaging/chocolatey</packageSourceUrl>
+    <version>0.21.3</version>
+    <packageSourceUrl>https://github.com/msize/wagterm/tree/master/packaging/chocolatey</packageSourceUrl>
     <owners>msize</owners>
     <title>WagTerm</title>
     <authors>msize, Boris Kudriashov</authors>
     <projectUrl>https://github.com/msize/wagterm</projectUrl>
-    <iconUrl>https://raw.githubusercontent.com/msize/wagterm/main/docs/wagterm-icon.png</iconUrl>
+    <iconUrl>https://cdn.jsdelivr.net/gh/msize/wagterm@v0.21.3/docs/wagterm-icon.png</iconUrl>
     <copyright>Copyright (c) 2026 Boris Kudriashov</copyright>
-    <licenseUrl>https://github.com/msize/wagterm/blob/main/LICENSE</licenseUrl>
+    <licenseUrl>https://github.com/msize/wagterm/blob/master/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <projectSourceUrl>https://github.com/msize/wagterm</projectSourceUrl>
     <docsUrl>https://github.com/msize/wagterm#readme</docsUrl>
@@ -37,6 +37,10 @@ inspired by [umputun's agterm](https://github.com/umputun/agterm).
 This package downloads the portable single-file build from the official GitHub release. The binary
 is unsigned but carries a Sigstore build-provenance attestation
 (`gh attestation verify &lt;file&gt; --repo msize/wagterm`).
+
+The package installs the GUI executable and a `wagterm` command shim. The separate `wagtermctl` CLI
+is available from the GitHub release. Settings are stored under `%LOCALAPPDATA%\wagterm` and
+preserved on uninstall. Update this installation with `choco upgrade wagterm`.
     </description>
     <releaseNotes>https://github.com/msize/wagterm/releases</releaseNotes>
   </metadata>
