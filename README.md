@@ -63,14 +63,10 @@ shell profiles configuration:
 
 Release builds target **Windows x64**. Both artifacts are self-contained (no .NET runtime needed) and need no admin rights.
 
-Releases are published in **[msize/wagterm](https://github.com/msize/wagterm/releases)**. The upstream agwinterm packages do not install WagTerm. Scoop, winget and Chocolatey registration for WagTerm is separate and is not assumed to exist.
-
 Direct download, from the [releases page](https://github.com/msize/wagterm/releases):
 
 - **`wagterm-setup-<version>.exe`** — per-user installer (Start-menu shortcut and uninstaller).
 - **`wagterm-portable-<version>-win-x64.exe`** — a single self-contained exe, no installation; settings still live under `%LOCALAPPDATA%\wagterm`.
-
-Package-publishing workflows are disabled until WagTerm has its own package registrations and credentials.
 
 Binaries are currently **unsigned**, so SmartScreen warns on first run → *More info → Run anyway*. Release artifacts carry **Sigstore build-provenance attestations**:
 
@@ -79,8 +75,6 @@ gh attestation verify <file> --repo msize/wagterm
 ```
 
 The installer is deliberately minimal. The integrations are **opt-in from inside the app**, from the command palette (`Ctrl+Shift+P`) or Settings, and safe to rerun: *Install Command-Line Tool (PATH)*, *Install Agent Status Hooks*, *Install Agent Skill* and *Install Shell Integration* (the same four are `wagtermctl install cli|hooks|skill|shell`), and default-terminal registration in *Settings → General*.
-
-For a lightweight alternative, see upstream's **[agliteterm](https://github.com/yeroo/agliteterm)**. It is maintained separately and retains agwinterm's integration identity, not WagTerm's.
 
 ## Scripting WagTerm
 
@@ -134,4 +128,4 @@ The original design comes from **[agterm](https://github.com/umputun/agterm)** b
 
 ## License
 
-[MIT](LICENSE) © 2026 Boris Kudriashov. Bundled theme files retain their upstream (iTerm2-Color-Schemes, MIT) licensing.
+[MIT](LICENSE) © 2026 Maxim Sizonenko (WagTerm-specific changes). Bundled theme files retain their upstream (iTerm2-Color-Schemes, MIT) licensing.
