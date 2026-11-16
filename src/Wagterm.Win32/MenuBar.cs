@@ -584,7 +584,7 @@ internal partial class Program
         var sb = new StringBuilder();
         sb.Append("WagTerm ").Append(_termProgramVersion);
         if (commit.Length > 0) sb.Append(" (").Append(commit.Length > 12 ? commit[..12] : commit).Append(')');
-        sb.Append("\n\nA Windows terminal for AI coding agents.\nForked from agwinterm by yeroo, inspired by agterm by umputun.\nIndependently maintained by msize.\n\nhttps://github.com/msize/wagterm\n\nMIT © Boris Kudriashov");
+        sb.Append("\n\nA Windows terminal for AI coding agents.\nForked from agwinterm by yeroo, inspired by agterm by umputun.\nIndependently maintained by msize.\n\nhttps://github.com/msize/wagterm\n\nMIT © 2026 Maxim Sizonenko");
         MessageBoxW(_hwnd, sb.ToString(), "About WagTerm", MB_OK | MB_ICONINFORMATION);
     }
 }

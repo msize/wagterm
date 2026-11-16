@@ -128,4 +128,4 @@ The original design comes from **[agterm](https://github.com/umputun/agterm)** b
 
 ## License
 
-[MIT](LICENSE) © 2026 Maxim Sizonenko (WagTerm-specific changes). Bundled theme files retain their upstream (iTerm2-Color-Schemes, MIT) licensing.
+[MIT](LICENSE) © 2026 Maxim Sizonenko. Bundled theme files retain their upstream (iTerm2-Color-Schemes, MIT) licensing.
