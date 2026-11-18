@@ -529,6 +529,7 @@ internal partial class Program : ISessionHost, IWindowHost
     private static string? _argDir;
     private static bool _argMaximized, _argFullscreen;
     private static bool _argPtyHost;   // run as the headless pty-host (#105) instead of a window
+    private static bool _argStopSessionHostsForUpdate;
     private static string? _argConpty;   // the pty-host role's conpty key, passed by the UI (#339)
     private static string? _argDefaultSessionHost;   // first-run seed for session-host (installer hook)
 
@@ -545,6 +546,7 @@ internal partial class Program : ISessionHost, IWindowHost
                 case "--no-restore": _argNoRestore = true; break;
                 case "--pipe" when i + 1 < args.Length: _argPipe = args[++i]; break;
                 case "--pty-host": _argPtyHost = true; break;
+                case "--stop-session-hosts-for-update": _argStopSessionHostsForUpdate = true; break;
                 case "--conpty" when i + 1 < args.Length: _argConpty = args[++i]; break;
                 case "--default-session-host" when i + 1 < args.Length: _argDefaultSessionHost = args[++i]; break;
                 case "--app-id" when i + 1 < args.Length: ++i; break; // consumed by ResolveAppId (namespaces data dir + pipe)
@@ -562,6 +564,23 @@ internal partial class Program : ISessionHost, IWindowHost
         // Publish the resolved instance id so child processes and shared (Pty) helpers resolve the same
         // data dir — and a nested wagterm inherits the dev/release identity of the one that launched it.
         Environment.SetEnvironmentVariable("WAGTERM_APP_ID", _appId);
+        if (_argStopSessionHostsForUpdate)
+        {
+            try
+            {
+                string hostNamespace = Environment.GetEnvironmentVariable("WAGTERM_UPDATE_HOST_NAMESPACE") ?? "";
+                if (string.IsNullOrWhiteSpace(hostNamespace))
+                    throw new InvalidOperationException("WAGTERM_UPDATE_HOST_NAMESPACE is required for update shutdown");
+                Task.Run(() =>
+                {
+                    AppUpdate.StopSessionHostsForUpdate(hostNamespace);
+                    AppUpdate.WaitForConsoleRuntimeForUpdate(Path.GetDirectoryName(AppExePath)!, TimeSpan.FromSeconds(30), Console.Error.WriteLine);
+                }).WaitAsync(TimeSpan.FromSeconds(105)).GetAwaiter().GetResult();
+            }
+            catch (TimeoutException ex) { Console.Error.WriteLine("Terminal host shutdown/runtime release timed out: " + ex.Message); Environment.ExitCode = 1; }
+            catch (Exception ex) { Console.Error.WriteLine(ex.Message); Environment.ExitCode = 1; }
+            return;
+        }
         // The pty-host ROLE (#105): same exe, no window — a headless server owning terminal sessions
         // so they survive UI restarts/crashes. The UI (Phase 2b) spawns and talks to it; nothing
         // below (config, D2D, window class, control server) applies to this process.
@@ -1494,6 +1513,7 @@ internal partial class Program : ISessionHost, IWindowHost
             _ = Task.Run(async () =>
             {
                 CleanupUpdateLeftovers();
+                Post(ShowAppUpdateResult);
                 while (true)
                 {
                     if (_config.ClaudeUpdateCheck) await CheckClaudeUpdateOnce();

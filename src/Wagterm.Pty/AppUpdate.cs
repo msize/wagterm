@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -141,21 +142,105 @@ public static class AppUpdate
         }
     }
 
-    /// <summary>The apply helper, written next to the download and run detached: waits for the app
-    /// process to exit, applies the channel's swap, relaunches the SAME exe path. The portable swap
-    /// renames the running exe aside (allowed while it runs) rather than overwriting; the app deletes
-    /// the ".old" leftover on its next start.</summary>
+    /// <summary>Stop both host backends in this instance, after its UI saved state and exited.
+    /// Shutdown closes hosted sessions. A host that does not exit prevents installation.</summary>
+    public static void StopSessionHostsForUpdate(string appId)
+    {
+        var clients = new List<PtyHostClient>();
+        try
+        {
+            // Check both namespaces before closing any sessions.
+            foreach (string name in new[] { appId, SessionBackends.RustNamespace(appId) })
+            {
+                if (!PtyHostClient.IsRunning(name)) continue;
+                var client = PtyHostClient.Connect(name);
+                clients.Add(client);
+                if (client.List().Any(session => session.Attached))
+                    throw new InvalidOperationException("Another WagTerm window is still attached to the terminal host");
+            }
+            foreach (var client in clients)
+            {
+                using var host = Process.GetProcessById(checked((int)client.HostPid));
+                _ = host.SafeHandle; // Hold the original process handle across shutdown.
+                if (client.List().Any(session => session.Attached))
+                    throw new InvalidOperationException("Another WagTerm window attached while preparing the update");
+                client.Shutdown();
+                if (!host.WaitForExit(30_000))
+                    throw new TimeoutException($"Terminal host {host.Id} did not exit");
+            }
+        }
+        finally { foreach (var client in clients) client.Dispose(); }
+    }
+
+    /// <summary>OpenConsole.exe can outlive its owning host. Wait for the bundled console runtime
+    /// to become writable before setup starts. The caller is itself the managed app, so its own
+    /// exe and assemblies are excluded; the PowerShell parent waits for that caller to exit.</summary>
+    public static void WaitForConsoleRuntimeForUpdate(string directory, TimeSpan timeout, Action<string>? log = null)
+    {
+        string[] files = [Path.Combine(directory, "conpty.dll"), Path.Combine(directory, "x64", "OpenConsole.exe"),
+            Path.Combine(directory, "wagterm-ptyhost.exe")];
+        var elapsed = Stopwatch.StartNew();
+        string? lastMessage = null;
+        while (true)
+        {
+            var busy = new List<string>();
+            foreach (string file in files)
+            {
+                if (!File.Exists(file)) continue;
+                try { using var probe = File.Open(file, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete); }
+                catch (IOException) { busy.Add(file); }
+                catch (UnauthorizedAccessException) { busy.Add(file); }
+            }
+            if (busy.Count == 0) return;
+            string message = "Console runtime files still in use or not writable: " + string.Join(", ", busy);
+            if (message != lastMessage) { log?.Invoke(message); lastMessage = message; }
+            if (elapsed.Elapsed >= timeout) throw new TimeoutException(message);
+            Thread.Sleep(100);
+        }
+    }
+
+    /// <summary>Script embedded in the running build and written beside its download. Waits for
+    /// that UI to exit, stops its terminal hosts, then runs setup or swaps the portable exe with
+    /// rollback on swap failure. Checks setup's exit code and the resulting version, writes a JSON
+    /// result, and relaunches the same exe unless the UI never exited. Required LogPath persists
+    /// outside payload cleanup. A portable .old exe is removed on the next startup.</summary>
     public static string HelperScript => """
-        param([int]$ProcId, [string]$Channel, [string]$Payload, [string]$Exe)
-        function Log([string]$m) { try { Add-Content -Path ($Payload + '.log') -Value ("{0:HH:mm:ss.fff} {1}" -f (Get-Date), $m) } catch { } }
+        param([int]$ProcId, [string]$Channel, [string]$Payload, [string]$Exe,
+              [string]$ExpectedVersion, [Parameter(Mandatory=$true)][string]$LogPath, [string]$ResultPath)
+        $ErrorActionPreference = 'Stop'
+        function Log([string]$m) { try { Add-Content -LiteralPath $LogPath -Encoding UTF8 -Value ("{0:yyyy-MM-dd HH:mm:ss.fff} {1}" -f (Get-Date), $m) } catch { } }
+        function App-Version([string]$path) { [regex]::Match([Diagnostics.FileVersionInfo]::GetVersionInfo($path).ProductVersion, '\d+\.\d+\.\d+').Value }
+        $result = @{ success = $false; version = $ExpectedVersion; error = ''; logPath = $LogPath }
+        $relaunch = $false
+        try {
+        $expectedCore = [regex]::Match($ExpectedVersion, '^\d+\.\d+\.\d+').Value
+        if ($ExpectedVersion -and -not $expectedCore) { throw "invalid expected version: $ExpectedVersion" }
         Log "wait pid=$ProcId channel=$Channel"
         try { Wait-Process -Id $ProcId -Timeout 120 -ErrorAction SilentlyContinue } catch { }
-        if (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) { Log 'ABORT: app never exited'; exit 1 }
+        if (Get-Process -Id $ProcId -ErrorAction SilentlyContinue) { throw 'app never exited' }
+        $relaunch = $true
         Start-Sleep -Milliseconds 500
-        Log 'app exited; applying'
         if ($Channel -eq 'installed') {
-          Start-Process $Payload -ArgumentList '/VERYSILENT','/NORESTART','/SUPPRESSMSGBOXES' -Wait
-          Log 'setup finished'
+          # Update the running layout, even if uninstall registration points to another copy.
+          $installDir = [IO.Path]::GetFullPath((Split-Path -Parent $Exe)).TrimEnd([IO.Path]::DirectorySeparatorChar)
+          if ($installDir -eq [IO.Path]::GetPathRoot($installDir).TrimEnd([IO.Path]::DirectorySeparatorChar)) { throw 'refusing a drive-root install directory' }
+        } elseif ($ExpectedVersion) {
+          $payloadVersion = App-Version $Payload
+          if ($payloadVersion -ne $expectedCore) { throw "expected portable WagTerm $ExpectedVersion, found '$payloadVersion'" }
+        }
+        Log 'app exited; stopping terminal hosts'
+        $hostLog = $LogPath + '.hosts.log'
+        $stop = Start-Process $Exe -ArgumentList '--stop-session-hosts-for-update' -Wait -PassThru -WindowStyle Hidden -RedirectStandardError $hostLog
+        if ($stop.ExitCode -ne 0) { throw "terminal hosts could not stop (exit code $($stop.ExitCode)). See $hostLog" }
+        Log 'terminal hosts stopped; applying'
+        if ($Channel -eq 'installed') {
+          $setupLog = $LogPath + '.setup.log'
+          $setupArgs = @('/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES', '/NOCLOSEAPPLICATIONS', '/NORESTARTAPPLICATIONS',
+                         '/RESTARTEXITCODE=3010', ('/LOG="{0}"' -f $setupLog), ('/DIR="{0}"' -f $installDir))
+          $setup = Start-Process $Payload -ArgumentList $setupArgs -Wait -PassThru -WindowStyle Hidden
+          Log "setup exit code: $($setup.ExitCode); setup log: $setupLog"
+          if ($setup.ExitCode -ne 0) { throw "setup failed with exit code $($setup.ExitCode). See $setupLog" }
+          Log 'setup finished successfully'
         } else {
           $old = $Exe + '.old'
           Remove-Item $old -Force -ErrorAction SilentlyContinue
@@ -163,12 +248,29 @@ public static class AppUpdate
           for ($i = 0; $i -lt 20 -and -not $moved; $i++) {   # straggler/AV locks: retry ~10s
             try { Move-Item $Exe $old -Force -ErrorAction Stop; $moved = $true } catch { Log ("rename-aside failed: " + $_.Exception.Message); Start-Sleep -Milliseconds 500 }
           }
-          if (-not $moved) { Log 'GIVING UP: exe still locked'; exit 1 }   # never delete the payload on failure
+          if (-not $moved) { throw 'exe still locked' }
           try { Move-Item $Payload $Exe -Force -ErrorAction Stop; Log 'swap done' }
-          catch { Log ("swap-in failed, rolling back: " + $_.Exception.Message); Move-Item $old $Exe -Force; exit 1 }
+          catch { Log ("swap-in failed, rolling back: " + $_.Exception.Message); Move-Item $old $Exe -Force; throw }
         }
-        Start-Process $Exe
-        Log 'relaunched'
+        if ($ExpectedVersion) {
+          $actual = App-Version $Exe
+          if ($actual -ne $expectedCore) { throw "expected WagTerm $ExpectedVersion after updating, found '$actual'" }
+        }
+        $result.success = $true
+        } catch {
+          $result.error = $_.Exception.Message
+          Log ("FAILED: " + $result.error)
+        }
+        if ($ResultPath) {
+          try { [IO.File]::WriteAllText($ResultPath, ($result | ConvertTo-Json -Compress)) }
+          catch { Log ("cannot save update result: " + $_.Exception.Message) }
+        }
+        if ($relaunch) {
+          [Environment]::SetEnvironmentVariable('WAGTERM_UPDATE_HOST_NAMESPACE', $null, 'Process')
+          try { Start-Process $Exe; Log 'relaunched' }
+          catch { Log ("relaunch failed: " + $_.Exception.Message); exit 1 }
+        }
+        if (-not $result.success) { exit 1 }
         """;
 
     private static HttpClient NewHttp()

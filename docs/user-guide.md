@@ -68,13 +68,22 @@
 - **WagTerm self-update** (palette → *Update WagTerm*, or `wagtermctl app update`): notices new
   releases on GitHub (`update-check = false` to opt out), then, on your command, downloads the right
   artifact for your install (installer or portable exe), **verifies its SHA-256** against the release
-  digest, restarts, and your sessions restore. Scoop and Chocolatey installs are never touched; the
+  digest, then asks for confirmation in the WagTerm window to restart **all terminal sessions**.
+  The CLI returns an immediate acknowledgement; cancelling the dialog leaves sessions running.
+  Running commands and agents stop. In server modes, existing session hosts also exit. Installed
+  builds run setup, while portable builds swap their exe. Windows and tabs reopen with fresh
+  processes. A failure shows an error after relaunch. If the UI never exited, the helper does not
+  launch a second copy; the error appears on the next manual start. Every attempt writes logs
+  under `%LOCALAPPDATA%/<app-id>/update-logs` (`wagterm` for the default instance); these logs are
+  retained without automatic pruning.
+  Scoop and Chocolatey installs are never touched; the
   hint points at your package manager instead.
 - **Shells that survive the UI** (EXPERIMENTAL): flip *Settings → General → Session host* to
   **Pty-host server** (`session-host = server`) and your sessions live in a tiny headless process.
-  Quit, self-update, or even crash the UI and every shell (including a running Claude conversation)
+  Quit or even crash the UI and every shell (including a running Claude conversation)
   **keeps running**; the next start reattaches each pane to its live session, same process, same
-  state. Closing a pane still closes its shell.
+  state. Closing a pane still closes its shell. Self-update explicitly stops these hosts after
+  confirmation, so the new version also applies to terminal processes.
 - **Splits** — side by side or stacked (`--axis vertical|horizontal`, agterm's words), either pane
   closable, the two swappable with every id kept; a split collapses to the survivor when a pane exits.
 - **Scratch** and **quick** terminals ([quick terminal](quick-terminal.md)), ephemeral **overlays**

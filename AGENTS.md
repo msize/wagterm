@@ -17,5 +17,6 @@
 - Native build: `cargo build --release --manifest-path native/Cargo.toml --locked`.
 - Native tests: `cargo test --release --manifest-path native/Cargo.toml --locked`.
 - Build the native binaries before managed tests to exercise the Rust parity and host paths.
+- The self-update host integration test also needs a fresh Release solution build: it launches the managed Win32 executable from its build output.
 - The managed loader and native core must agree on ABI 20 and the `wagcore_*` exports.
 - The Ralphex launcher fixtures require Go 1.26, matching CI. Go 1.25 cannot compile `os.Process.WithHandle`.

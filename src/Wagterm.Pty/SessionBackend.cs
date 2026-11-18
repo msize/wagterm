@@ -26,6 +26,8 @@ public sealed class InProcessSessionBackend : ISessionBackend
 
 public static class SessionBackends
 {
+    public static string RustNamespace(string appId) => appId + "-rust";
+
     /// <summary>Resolve the configured <c>session-host</c> value to a backend:
     ///  - "server": the C# pty-host (the same exe, <c>--pty-host</c> role).
     ///  - "server-rust": the standalone Rust pty-host binary (wagterm-ptyhost.exe next to the
@@ -44,7 +46,7 @@ public static class SessionBackends
             return new ServerSessionBackend(appId, exePath, $"--pty-host --pipe \"{appId}\"{conptyArg}");
         if (string.Equals(configured, "server-rust", StringComparison.OrdinalIgnoreCase))
         {
-            string rustAppId = appId + "-rust";
+            string rustAppId = RustNamespace(appId);
             string? rustHost = FindRustHost(exePath);
             return new ServerSessionBackend(rustAppId, rustHost, $"--pipe \"{rustAppId}\"{conptyArg}", name: "server-rust");
         }

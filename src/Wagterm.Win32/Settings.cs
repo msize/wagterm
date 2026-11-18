@@ -109,8 +109,8 @@ internal partial class Program
         _setRows.Add(new SetRow { Kind = SW.Path, Tab = 0, Key = "new-session-dir", Label = "Custom directory" });
         Tog(0, "restore-commands", "Restore running commands");
         Tog(0, "confirm-close-session", "Confirm before closing");
-        // pty-host opt-in (#105): server mode keeps shells alive across UI restarts/updates/crashes.
-        Drop(0, "session-host", "Session host (shells survive restarts)",
+        // pty-host opt-in (#105): shells survive UI quits/crashes; self-update stops hosts.
+        Drop(0, "session-host", "Session host (shells survive UI quits)",
             new[] { "In-process (default)", "Pty-host server (experimental)", "Pty-host server: Rust (experimental)" },
             new[] { "in-process", "server", "server-rust" });
         // Rust core opt-in: new sessions parse/render state in native/wagterm-core.

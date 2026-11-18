@@ -81,14 +81,15 @@ public sealed class TerminalConfig
 
     /// <summary>Periodically check GitHub for a newer wagterm release and surface a hint (toast +
     /// palette) when one ships. Awareness only — applying it stays a manual palette action
-    /// ("Update wagterm"), which downloads, verifies, restarts, and restores sessions.</summary>
+    /// ("Update wagterm"), which downloads, verifies and asks before restarting terminal processes.</summary>
     public bool UpdateCheck { get; set; } = true;
 
     /// <summary>Where terminal sessions live: "in-process" (default — the UI process owns the
     /// ConPTYs), "server" (EXPERIMENTAL, #105 — a separate C# pty-host process owns them), or
     /// "server-rust" (EXPERIMENTAL — the standalone Rust pty-host binary; same protocol, but
     /// blocking-threaded so the .NET 10 IOCP crash class is absent). Both server modes let sessions
-    /// survive UI updates/crashes; server-rust falls back to in-process if the binary is missing.</summary>
+    /// survive UI quits/crashes; self-update explicitly stops hosts after confirmation.
+    /// server-rust falls back to in-process if the binary is missing.</summary>
     public string SessionHost { get; set; } = "in-process";
 
     /// <summary>Which ConPTY sessions run on: "inbox" (default, the conhost built into Windows) or
@@ -289,18 +290,19 @@ public sealed class TerminalConfig
 
         # Check GitHub in the background for a newer wagterm release and show a hint when one
         # ships. Applying it is always manual: palette -> "Update wagterm" (downloads the release,
-        # verifies its SHA-256, restarts, and your sessions restore). Installs managed by a package
+        # verifies its SHA-256, asks before stopping running commands, and reopens windows/tabs
+        # with fresh terminal processes). Installs managed by a package
         # manager (scoop/chocolatey) are never self-updated - the hint points at the manager instead.
         update-check = true
 
         # Where terminal sessions live. "in-process" (default): the window process owns them.
         # "server" (EXPERIMENTAL, github #105): a separate C# pty-host process owns them, so shells
-        # KEEP RUNNING when the UI quits, updates, or crashes - the next start reconnects every pane
+        # KEEP RUNNING when the UI quits or crashes - the next start reconnects every pane
         # to its live session (closing a pane still closes its shell). "server-rust" (EXPERIMENTAL):
         # same, but the host is the standalone Rust binary (wagterm-ptyhost.exe) - identical
         # protocol, blocking-threaded so a .NET runtime IOCP crash class can't occur; falls back to
         # in-process if the binary isn't present. Changing this applies to NEW sessions immediately;
-        # restart wagterm to migrate existing ones.
+        # restart wagterm to migrate existing ones. Self-update stops hosts after confirmation.
         session-host = in-process
 
         # Which ConPTY sessions run on. "inbox" (default): the conhost built into Windows, which

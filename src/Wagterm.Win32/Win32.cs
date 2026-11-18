@@ -541,7 +541,8 @@ internal static class Win32
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern int MessageBoxW(IntPtr hWnd, string text, string caption, uint type);
-    public const uint MB_YESNO = 0x4, MB_ICONQUESTION = 0x20, MB_ICONINFORMATION = 0x40;
+    public const uint MB_YESNO = 0x4, MB_ICONERROR = 0x10, MB_ICONQUESTION = 0x20, MB_ICONINFORMATION = 0x40;
+    public const uint MB_DEFBUTTON2 = 0x100;
     public const int IDYES = 6;
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]

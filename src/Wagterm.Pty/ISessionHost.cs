@@ -617,7 +617,8 @@ public interface ISessionHost
 
     /// <summary>The wagterm self-update workflow: download + SHA-256-verify the latest release for
     /// this install channel (installer / portable; package-manager installs are refused with a hint),
-    /// then exit, swap, relaunch — sessions restore. Returns an ack / error string.</summary>
+    /// then ask for confirmation, exit, stop terminal hosts, install/swap and reopen windows/tabs
+    /// with fresh terminal processes. Returns an immediate ack / error string.</summary>
     string UpdateApp();
 
     /// <summary>Focus/unfocus the active workspace (hide the others in the sidebar tree): op = on|off|toggle.</summary>

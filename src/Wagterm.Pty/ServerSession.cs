@@ -104,7 +104,8 @@ public sealed class ServerSessionBackend : ISessionBackend, IDisposable
 ///
 /// Lifecycle: <see cref="Dispose"/> KILLS the hosted session (explicit pane close);
 /// <see cref="Detach"/> releases it alive (app quit) for a later <see cref="TryAdopt"/> — that
-/// split is what lets shells survive UI restarts, updates, and crashes (#105, Phase 2c).
+/// split is what lets shells survive UI restarts and crashes (#105, Phase 2c).
+/// Self-update explicitly shuts the hosts down after the UI has detached.
 /// </summary>
 public sealed class ServerSession : ISession
 {

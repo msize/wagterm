@@ -1004,8 +1004,8 @@ internal partial class Program
                         Secondary = AppChannel() switch
                         {
                             Wagterm.Pty.UpdateChannel.PackageManager => "managed by scoop/chocolatey — update with the package manager",
-                            Wagterm.Pty.UpdateChannel.Installed => "downloads the new installer, restarts — sessions restore",
-                            _ => "swaps the portable exe, restarts — sessions restore",
+                            Wagterm.Pty.UpdateChannel.Installed => "downloads the installer, asks, then restarts all terminal sessions",
+                            _ => "asks, swaps the portable exe, restarts all terminal sessions",
                         },
                         Search = "update wagterm upgrade version self",
                         Run = () => ShowToast(UpdateWagterm(), 3000),

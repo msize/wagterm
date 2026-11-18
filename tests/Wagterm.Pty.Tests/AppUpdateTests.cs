@@ -96,6 +96,6 @@ public class AppUpdateTests
         Assert.Contains("/VERYSILENT", s);                         // installed channel: silent per-user setup
         Assert.Contains("$Exe + '.old'", s);                       // portable channel: rename-aside, not overwrite
         Assert.Contains("Move-Item $old $Exe", s);                 // rollback path restores the app on failure
-        Assert.Contains("Start-Process $Exe", s);                  // relaunch the same path either way
+        Assert.Contains("Start-Process $Exe", s);                  // relaunch after applying or an apply failure, once the UI exited
     }
 }
