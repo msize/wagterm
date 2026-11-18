@@ -11,7 +11,7 @@ public class AgentSkillTests
             @"wagtermctl image frameshm <Local\wagterm-frame-NAME>",
             AgentSkill.SkillMarkdown);
         Assert.Contains(
-            "https://github.com/msize/wagterm/blob/main/docs/specs/image-frameshm.md",
+            "https://github.com/msize/wagterm/blob/master/docs/specs/image-frameshm.md",
             AgentSkill.SkillMarkdown);
         Assert.Contains("wagtermctl session metrics [<pane-id>] --json", AgentSkill.SkillMarkdown);
         Assert.Contains("Ordinary", AgentSkill.SkillMarkdown);

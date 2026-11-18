@@ -459,7 +459,7 @@ internal partial class Program
             case "focus_left": FocusPane(-1); break;
             case "focus_right": FocusPane(1); break;
             // Help
-            case "docs": OpenLink("https://github.com/msize/wagterm/blob/main/docs/control-api.md"); break;
+            case "docs": OpenLink("https://github.com/msize/wagterm/blob/master/docs/control-api.md"); break;
             case "install_cli": InstallCli(); break;
             case "install_hooks": InstallHooks(); break;
             case "install_notifications": InstallNotifications(); break;
