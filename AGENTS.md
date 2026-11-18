@@ -6,6 +6,10 @@
 - The Win32 project is `Wagterm.Win32`, but its assembly name is `wagterm`. Friend-assembly declarations and reflection tests must use the assembly name where appropriate.
 - Historical plans and reports retain upstream names, versions and issue references.
 
+## Local workflow
+
+- Follow the existing commit history: use Conventional Commits such as `fix: ...`, `feat: ...`, `docs: ...`, and `chore: ...`. Do not ask which commit format to use in this repository.
+
 ## Verification
 
 - Managed build: `dotnet build Wagterm.slnx -c Release`.
