@@ -988,6 +988,7 @@ internal partial class Program
                     // Opt-in integrations (agterm's Help-menu trio + shell) — the installer stays minimal.
                     A("Install Command-Line Tool (PATH)", "", InstallCli);
                     A("Install Agent Status Hooks", "", InstallHooks);
+                    A("Install Agent Notifications", "", InstallNotifications);
                     A("Make Claude Sessions Resumable", "", MakeClaudeResumable);
                     A("Restart Claude in YOLO Mode", "", RestartClaudeYoloActive);
                     _palAll.Add(new PalItem

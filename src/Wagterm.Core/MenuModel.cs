@@ -128,6 +128,7 @@ public static class MenuModel
             MenuItemDef.Separator,
             new MenuItemDef("install_cli", "Install Command Line Tool…"),
             new MenuItemDef("install_hooks", "Install Agent Status Hooks…"),
+            new MenuItemDef("install_notifications", "Install Agent Notifications…"),
             new MenuItemDef("install_skill", "Install Agent Skill…"),
             new MenuItemDef("install_shell", "Install Shell Integration…"),
             MenuItemDef.Separator,

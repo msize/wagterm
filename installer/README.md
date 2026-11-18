@@ -60,10 +60,13 @@ Open the action palette (**Ctrl+Shift+P**) and run the **Install …** entries w
   auto-resumes the conversation. When an existing Devin JSONC config needs changes, its exact original
   is kept in a numbered `.wagterm.bak` sibling before the active config is rewritten as JSON without
   comments or formatting.
+- **Install Agent Notifications** — completion alerts, questions and permission notifications for
+  Claude Code / Codex / Devin. Reply previews can appear on the desktop. Changed configs are backed
+  up before merging hooks. Re-running the installer does not duplicate hooks.
 - **Install Agent Skill** — teaches agents to drive wagterm via `wagtermctl`.
 - **Install Shell Integration** — a `$PROFILE` OSC-7 hook for live cwd (also works out of the box without this).
 
-Each is reversible / re-runnable and can also be driven headless: `wagtermctl install cli|hooks|skill|shell`.
+Each can be re-run and can also be driven headless: `wagtermctl install cli|hooks|notifications|skill|shell`.
 
 ## Silent install / uninstall
 

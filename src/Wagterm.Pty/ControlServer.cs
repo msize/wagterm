@@ -212,6 +212,7 @@ public sealed class ControlServer : IDisposable
             {
                 case "ping": return Ok("wagterm " + AppVersion());
                 case "install.hooks": return Ok(AgentHooks.Install());
+                case "install.notifications": return Ok(AgentNotifications.Install());
                 case "install.skill": return Ok(AgentSkill.Install());
                 case "install.shell": return Ok(ShellIntegrationInstaller.Install());
                 case "install.cli": return Ok(GetBool(args, "remove") ? CliInstaller.Uninstall() : CliInstaller.Install());

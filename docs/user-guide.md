@@ -20,6 +20,29 @@
   When an existing Devin JSONC config needs changes, the installer keeps its exact original in a
   numbered `.wagterm.bak` sibling, then rewrites the active config as JSON without comments or
   formatting.
+- **Agent text notifications**: **Help > Install Agent Notifications** or
+  `wagtermctl install notifications` installs notification hooks for Claude Code, Codex and Devin.
+  Completion alerts, questions and permission details appear in WagTerm notifications (up to 200 characters).
+  Claude Code and Codex include reply previews. Devin shows `Turn completed` when its Stop event
+  provides no reply text.
+  Claude permission alerts use the same `Notification(permission_prompt)` event as status hooks:
+  a generic message after about six seconds without typing. Codex and Devin include tool details.
+  Questions and permission requests mark the pane `blocked`; submitting a prompt or completing a
+  tool restores `active`. A Codex turn ending with a question also marks it `blocked`.
+  This installer is independent of status/resume setup and does not change Codex's `config.toml`
+  or its existing `notify` program. It writes `%LOCALAPPDATA%/wagterm/wagterm-agent-notify.ps1`
+  and merges hooks into `~/.claude/settings.json`, `~/.codex/hooks.json`, and
+  `%APPDATA%/devin/config.json`. Changed configs get a numbered `.wagterm.bak` sibling first.
+  Known manual commands of the form `bash <path> stop|permission|question`, using
+  `~/.claude/hooks/wagterm-notify.sh` or `~/.config/devin/hooks/wagterm-notify.sh` under their
+  matching events, are replaced to avoid duplicate notifications. Scripts and other hooks are kept.
+  Devin JSONC is rewritten as JSON, so comments and formatting
+  remain only in the backup. **Restart the agents afterwards. In Codex, open `/hooks` and
+  enable/trust the new hooks.** No Bash, jq or Python installation is needed by these hooks.
+  The installer leaves `desktop-notifications` and Windows notification settings unchanged.
+  `desktop-notifications` defaults to `true`, so previews can appear on the desktop immediately.
+  Reply and command text can be visible on the desktop: only install if that is appropriate for
+  the projects you work on. Hooks stay silent outside WagTerm.
 - **Claude Code, Codex and Devin session binding & auto-resume**: the same installer adds a
   `SessionStart` hook to each agent. Each time a session starts, resumes, is cleared or compacts, the
   hook tells wagterm the live session id and directory, and wagterm stores the line that resumes it

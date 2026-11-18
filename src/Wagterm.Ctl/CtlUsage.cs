@@ -129,6 +129,9 @@ public static class CtlUsage
           wagtermctl image frameshm --images '[{"name":"Local\\wagterm-frame-x","slot":0,...}]'
               (several entries applied as one all-or-nothing frame; see docs/specs/image-frameshm.md)
           wagtermctl install hooks
+          wagtermctl install notifications                (Claude/Codex/Devin text notifications; backs up configs,
+              replaces known manual WagTerm notification hooks; Devin JSONC comments/formatting are kept only in
+              the backup. Restart agents afterwards; enable/trust Codex hooks in /hooks.)
         Target defaults to $WAGTERM_SESSION_ID (the current session) when not given.
         --timeout <seconds> bounds the wait for the app's reply (default 30, 0 = no limit; a
             `session overlay open --block` waits for its overlay without a limit unless given).

@@ -462,6 +462,7 @@ internal partial class Program
             case "docs": OpenLink("https://github.com/msize/wagterm/blob/main/docs/control-api.md"); break;
             case "install_cli": InstallCli(); break;
             case "install_hooks": InstallHooks(); break;
+            case "install_notifications": InstallNotifications(); break;
             case "install_skill": InstallSkill(); break;
             case "install_shell": InstallShellIntegration(); break;
             case "check_updates": ShowToast(UpdateWagterm(), 3000); break;

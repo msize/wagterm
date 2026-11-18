@@ -59,6 +59,13 @@ public static class AgentSkill
         and installs a generic PowerShell-profile bridge that marks any command matching `$env:WAGTERM_AGENT_RE`
         active/completed.
 
+        Text notifications are a separate opt-in: `wagtermctl install notifications` installs
+        Claude Code, Codex and Devin hooks for completion alerts, questions and permissions (up to 200
+        characters, potentially visible on the desktop). Claude Code and Codex include reply previews;
+        Devin shows "Turn completed" when reply text is unavailable. It backs up configs and replaces known manual
+        WagTerm notification hooks. Devin JSONC comments/formatting remain only in the backup.
+        Restart the agents afterwards; enable/trust the new Codex hooks in /hooks.
+
         ## Manage sessions & workspaces
         - `wagtermctl tree --json`                              — list workspaces+sessions (id, name, active, status,
           `statusChangedAt` = epoch SECONDS of the last status write on the pane whose status the node is
@@ -492,6 +499,7 @@ public static class AgentSkill
           the state directory and capture again. `session context` / `session rename` replies describe the value in
           memory the same way — their save is best-effort and silent.
         - `wagtermctl install hooks|skill|shell`               — install agent-status hooks / this skill / shell-integration (live cwd)
+        - `wagtermctl install notifications`                   — opt-in Claude/Codex/Devin text notifications (backs up configs; restart agents, trust Codex hooks)
         - `wagtermctl install cli [--remove]`                  — add (or remove) wagtermctl on the user PATH
         - `wagtermctl omp list` / `omp set <name> [--persist]` — list / apply oh-my-posh themes (live; --persist keeps it for new sessions).
           A name that resolves to no theme is REFUSED (`ok:false`, the theme in effect unchanged) — it used to answer `ok:true` with the text.

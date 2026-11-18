@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO.Pipes;
 using System.Text;
+using System.Text.Json;
 using Wagterm.Ctl;
 
 namespace Wagterm.Pty.Tests;
@@ -26,7 +27,7 @@ public class CtlRequestTests : IDisposable
 
     /// <summary>A one-connection server: reads the request line, then answers <paramref name="reply"/>,
     /// hangs up when it is null and <paramref name="hangUp"/>, or else says nothing and holds the pipe.</summary>
-    private string StartServer(string? reply, bool hangUp = false)
+    private string StartServer(string? reply, bool hangUp = false, Action<string?>? onRequest = null)
     {
         string pipeName = "wagterm-test-ctl-" + Guid.NewGuid().ToString("N");
         var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
@@ -37,7 +38,8 @@ public class CtlRequestTests : IDisposable
             {
                 await server.WaitForConnectionAsync();
                 var reader = new StreamReader(server, Encoding.UTF8, false, 1024, leaveOpen: true);
-                await reader.ReadLineAsync();
+                string? request = await reader.ReadLineAsync();
+                onRequest?.Invoke(request);
                 if (reply is not null)
                 {
                     var writer = new StreamWriter(server, new UTF8Encoding(false), 1024, leaveOpen: true) { AutoFlush = true };
@@ -133,6 +135,19 @@ public class CtlRequestTests : IDisposable
         var (code, stdout, _) = RunCtl("ping", "--pipe", pipe);
         Assert.Equal(0, code);
         Assert.Equal("pong", stdout.Trim());
+    }
+
+    [Fact]
+    public async Task InstallNotificationsUsesItsOwnVerb()
+    {
+        var request = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string pipe = StartServer("{\"ok\":true,\"result\":\"installed\"}", onRequest: line => request.SetResult(line));
+        var (code, stdout, _) = RunCtl("install", "notifications", "--pipe", pipe);
+        Assert.Equal(0, code);
+        Assert.Equal("installed", stdout.Trim());
+        string? line = await request.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        using var doc = JsonDocument.Parse(line!);
+        Assert.Equal("install.notifications", doc.RootElement.GetProperty("cmd").GetString());
     }
 
     private static (int ExitCode, string StdOut, string StdErr) RunCtl(params string[] args)

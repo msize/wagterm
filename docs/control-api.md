@@ -223,6 +223,38 @@ Replies `{action, pane, session}` instead of the word "pinned".
 - `tree --json` reads the pins back as `restoreCommands`, an object keyed by pane id that lists only
   pinned panes.
 
+## `install.notifications`
+
+`wagtermctl install notifications` sends `{"cmd":"install.notifications"}`. Like `install.hooks`,
+this is app-level and does not depend on the selected window or pane. It installs text notification
+hooks for Claude Code, Codex and Devin, without installing status/resume integration or changing
+Codex's `config.toml` / `notify` program.
+
+The result reports each agent's config path, backups, and failures independently. Failures are
+reported in result text, even when the request returns `ok:true`. Changed existing configs
+are backed up before changes; malformed JSON or hook structures are refused. Missing configs are
+created, including for agents not yet installed. Devin JSONC is accepted
+but rewritten as JSON, so comments and formatting survive only in the backup. Known manual WagTerm
+notification hooks are replaced without deleting the scripts. Repeated installation does not
+duplicate hooks. Restart the agents and enable/trust the new Codex hooks in `/hooks`.
+Existing configs are updated in place after backup to preserve links and access rules.
+
+The shared `%LOCALAPPDATA%/wagterm/wagterm-agent-notify.ps1` reads events on stdin, sends pane-targeted
+`session.status` and `notify` requests, using `WAGTERM_WINDOW_ID` to reach the owning window even
+when another window is selected, and never writes hook decisions to stdout. Without a window identity,
+requests use the API's default window routing. Text is flattened
+and capped at 200 UTF-16 units without splitting surrogate pairs. Completion uses category `ok`
+and status `completed`; questions and permission requests use `attention` and `blocked`.
+A Codex reply ending in `?` also uses `attention` and `blocked`, with a "needs your answer" title.
+Claude permission alerts deliberately use the same `Notification(permission_prompt)` event as
+status hooks: a generic message after about six seconds without typing. Codex and Devin include
+tool details. Prompt submission and tool completion restore
+`active`. The installer leaves `desktop-notifications` and Windows notification settings unchanged.
+Claude Code and Codex provide reply previews. Devin's documented Stop payload has no reply text,
+so its completion notification falls back to `Turn completed` when text is unavailable.
+`desktop-notifications` defaults to `true`, so reply and command text can appear on the desktop
+immediately after installation, subject to Windows notification settings.
+
 ## `session.bind` from a SessionStart hook
 
 `install hooks` makes the `SessionStart` hook of Claude Code, Codex and Devin send

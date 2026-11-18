@@ -80,6 +80,7 @@ switch (area)
         target = null;
         break;
     case "install" when sub == "hooks": cmd = "install.hooks"; break;
+    case "install" when sub == "notifications": cmd = "install.notifications"; break;
     case "install" when sub == "skill": cmd = "install.skill"; break;
     case "install" when sub == "shell": cmd = "install.shell"; break;
     case "install" when sub == "cli": cmd = "install.cli"; if (options.ContainsKey("remove")) cargs["remove"] = true; break;

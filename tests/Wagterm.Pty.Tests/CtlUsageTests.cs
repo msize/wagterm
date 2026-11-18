@@ -58,7 +58,7 @@ public class CtlUsageTests
     {
         Assert.False(string.IsNullOrWhiteSpace(CtlUsage.Long));
         foreach (var verb in new[] { "session new", "session close", "session split", "session text",
-                                     "surface cursor", "install hooks" })
+                                     "surface cursor", "install hooks", "install notifications" })
             Assert.Contains(verb, CtlUsage.Long);
         Assert.StartsWith("usage: wagtermctl", CtlUsage.Short);
     }

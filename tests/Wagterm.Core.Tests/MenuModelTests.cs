@@ -58,7 +58,8 @@ public class MenuModelTests
         Assert.Equal(new[]
         {
             "Developer Documentation…", "-",
-            "Install Command Line Tool…", "Install Agent Status Hooks…", "Install Agent Skill…", "Install Shell Integration…", "-",
+            "Install Command Line Tool…", "Install Agent Status Hooks…", "Install Agent Notifications…",
+            "Install Agent Skill…", "Install Shell Integration…", "-",
             "Check for Updates…", "About WagTerm",
         }, MenuModel.Menus[3].Items.Select(i => i.Label));
     }

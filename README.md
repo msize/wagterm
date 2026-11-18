@@ -28,6 +28,7 @@ What it does:
 - **Control API and CLI.** `wagtermctl` drives almost everything over a named pipe, with full read-back: the tree with split ratios and pane ids, window state, session output, a pane's caret column, the age of a status.
 - **Splits, scratch, quick terminal and overlays.** Split a session side by side or stacked, open a scratch or a detached quick terminal, run a program in an overlay over a session or over one pane of it, or show a passive HUD.
 - **Agent status and skill.** Agents report their state through hooks or the API as a colored dot and a title-bar bell. Opt-in installers add the agent skill, Claude Code / Codex / Devin status hooks, shell integration and the CLI on `PATH`.
+- **Agent text notifications.** **Help > Install Agent Notifications** (or `wagtermctl install notifications`) installs Claude Code / Codex / Devin hooks for completion alerts, questions and permission requests, with up to 200 characters of text. Claude Code and Codex include reply previews. Devin shows a completion message when reply text is unavailable. Separate from status/resume setup, with config backups and Codex hook approval.
 - **Claude Code binding and auto-resume.** A `claude` wrapper ties each conversation to its pane, so a restart re-launches every bound pane and the conversation comes back. Updating Claude Code restarts every running Claude session into its own conversation.
 - **Restore, and shells that survive the UI.** Sessions come back with their layout and pinned commands, and with captured commands when `restore-commands` is on. The experimental pty-host server mode keeps every shell running through a UI quit, update or crash.
 - **A real Windows terminal.** Default Terminal Application registration, ~33k lines/s output, Sixel and Kitty graphics, the Kitty keyboard protocol, ligatures, elevated and de-elevated sessions side by side, and agterm's menus — File, View, Navigate, Help — as a menu bar in the title bar (Alt or F10).
@@ -74,7 +75,7 @@ Binaries are currently **unsigned**, so SmartScreen warns on first run → *More
 gh attestation verify <file> --repo msize/wagterm
 ```
 
-The installer is deliberately minimal. The integrations are **opt-in from inside the app**, from the command palette (`Ctrl+Shift+P`) or Settings, and safe to rerun: *Install Command-Line Tool (PATH)*, *Install Agent Status Hooks*, *Install Agent Skill* and *Install Shell Integration* (the same four are `wagtermctl install cli|hooks|skill|shell`), and default-terminal registration in *Settings → General*.
+The installer is deliberately minimal. The integrations are **opt-in from inside the app**, from the command palette (`Ctrl+Shift+P`) or Settings, and safe to rerun: *Install Command-Line Tool (PATH)*, *Install Agent Status Hooks*, *Install Agent Notifications*, *Install Agent Skill* and *Install Shell Integration* (`wagtermctl install cli|hooks|notifications|skill|shell`), and default-terminal registration in *Settings → General*.
 
 ## Scripting WagTerm
 
