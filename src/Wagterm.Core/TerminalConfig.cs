@@ -123,6 +123,9 @@ public sealed class TerminalConfig
     /// <summary>Show OS desktop notifications (tray balloon) for OSC 9/777 / notify. Off → in-app banner + badge only.</summary>
     public bool DesktopNotifications { get; set; } = true;
 
+    /// <summary>How long in-app notification banners stay visible, in seconds (1–120). Default 10.</summary>
+    public int NotificationDuration { get; set; } = 10;
+
     /// <summary>Sound played whenever a session enters the "blocked" agent status (empty / "off" / "none" = silent).
     /// May be a system-sound name (beep, asterisk, exclamation, hand, question), a Windows sound-event alias
     /// (e.g. "SystemNotification"), or a full path to a .wav file.</summary>
@@ -278,6 +281,9 @@ public sealed class TerminalConfig
         # Desktop notifications: show an OS tray-balloon for OSC 9/777 / `wagtermctl notify`
         # (the in-app banner + sidebar badge always show regardless). Set false to suppress the OS toast.
         desktop-notifications = true
+
+        # In-app notification banner duration in seconds (1-120). Applies to new notifications.
+        notification-duration = 10
 
         # Flash the taskbar button when a notification arrives while the window is in the background:
         # none | once | until-focused
@@ -489,6 +495,7 @@ public sealed class TerminalConfig
                     break;
                 case "word-delimiters": cfg.WordDelimiters = val; break;
                 case "desktop-notifications": cfg.DesktopNotifications = ParseBool(val, cfg.DesktopNotifications); break;
+                case "notification-duration": if (int.TryParse(val, out var nd)) cfg.NotificationDuration = System.Math.Clamp(nd, 1, 120); break;
                 case "blocked-sound": cfg.BlockedSound = val; break;
                 case "notification-sound": cfg.NotificationSound = val; break;
                 case "inactive-pane-dim": if (int.TryParse(val, out var ipd)) cfg.InactivePaneDim = System.Math.Clamp(ipd, 0, 100); break;

@@ -237,7 +237,7 @@ $childDone=Join-Path $artifact 'child-done.txt'
 $null=Rpc 'session.type' @{text="powershell.exe -NoProfile -Command Start-Sleep 2 & echo done>`"$childDone`"`r"} $session
 Check 'child command makes foreground shell unknown' (NavWait {$null-eq (Node $session).foregroundShell})
 Check 'shell hint returns after child completes' (NavWait {(Test-Path $childDone) -and (Node $session).foregroundShell-eq 'cmd'})
-foreach($pair in @(@('cursor-style','nonsense'),@('cursor-blink','perhaps'),@('cursor-blink-ms','0'),@('cursor-blink-ms','x'))){
+foreach($pair in @(@('cursor-style','nonsense'),@('cursor-blink','perhaps'),@('cursor-blink-ms','0'),@('cursor-blink-ms','x'),@('notification-duration','0'),@('notification-duration','121'),@('notification-duration','x'),@('notification-duration','1.5'))){
     $old=Rpc 'config.get' @{key=$pair[0]}
     Check "invalid $($pair[0]) refuses and preserves value" (-not (Rpc 'config.set' @{key=$pair[0];value=$pair[1]} -AllowError).ok -and (Rpc 'config.get' @{key=$pair[0]})-eq $old)
 }

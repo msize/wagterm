@@ -158,6 +158,7 @@ internal partial class Program
         // Notifications
         Sec(2, "Notifications");
         Tog(2, "desktop-notifications", "Desktop notifications (OS tray)");
+        Sld(2, "notification-duration", "In-app banner duration (seconds)", 1, 120);
         Tog(2, "notification-badges", "Unread badges on sidebar rows");
         Sec(2, "Badge colors");
         Col(2, "notification-color-ok", "OK");

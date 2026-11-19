@@ -43,6 +43,11 @@
   `desktop-notifications` defaults to `true`, so previews can appear on the desktop immediately.
   Reply and command text can be visible on the desktop: only install if that is appropriate for
   the projects you work on. Hooks stay silent outside WagTerm.
+- **In-app notification banners** (`wagtermctl notify`, OSC 9/777, agent hooks) stay visible for
+  10 seconds by default. Change **Settings → Notifications → In-app banner duration (seconds)**
+  or run `wagtermctl config set notification-duration 30` for a 30-second banner. The setting is
+  saved and applies to the next notification. The command accepts whole seconds from 1 to 120
+  and rejects invalid values. Later notifications or status messages can replace the banner sooner.
 - **Claude Code, Codex and Devin session binding & auto-resume**: the same installer adds a
   `SessionStart` hook to each agent. Each time a session starts, resumes, is cleared or compacts, the
   hook tells wagterm the live session id and directory, and wagterm stores the line that resumes it

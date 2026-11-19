@@ -82,7 +82,7 @@ internal partial class Program
         string label = string.IsNullOrEmpty(title) ? body : $"{title}: {body}";
         _toastText = label.Length == 0 ? "(notification)" : label;
         _toastTarget = ses;                       // clicking the banner jumps to the raising session
-        SetTimer(_hwnd, (IntPtr)2, 4000, IntPtr.Zero);
+        SetTimer(_hwnd, (IntPtr)2, (uint)(_config.NotificationDuration * 1000), IntPtr.Zero);
         PlayNotificationSound();                  // opt-in sound on banner delivery (agterm #232)
         EmitEvent("notification", p.Id, _toastText);   // control-API event log (#273)
         if (_config.DesktopNotifications) TrayNotify(title, body);
@@ -950,7 +950,7 @@ internal partial class Program
         "theme-follow-system", "theme-dark", "theme-light",
         "scrollback-lines", "inactive-pane-dim", "unfocused-dim", "builtin-glyphs", "ligatures", "window-opacity", "sidebar-tint", "sidebar-font-size", "scroll-speed",
         "new-session-dir", "right-click-paste", "copy-on-select", "copy-on-ctrl-c", "word-delimiters", "desktop-notifications", "shell-integration",
-        "restore-commands", "restore-buffer", "blocked-sound", "notification-sound", "omp-theme", "omp-integration", "prompt-engine", "starship-theme",
+        "restore-commands", "restore-buffer", "blocked-sound", "notification-sound", "notification-duration", "omp-theme", "omp-integration", "prompt-engine", "starship-theme",
         "new-session-dir-mode", "confirm-close-session", "compact-toolbar", "toolbar-mode", "notification-badges",
         "notification-color-ok", "notification-color-normal", "notification-color-attention", "workspace-add-button",
         "show-scratch-button", "show-split-button", "show-dashboard-button", "show-quick-button", "show-menu-bar",
@@ -1013,6 +1013,7 @@ internal partial class Program
         "copy-on-ctrl-c" => _config.CopyOnCtrlC ? "true" : "false",
         "word-delimiters" => _config.WordDelimiters,
         "desktop-notifications" => _config.DesktopNotifications ? "true" : "false",
+        "notification-duration" => _config.NotificationDuration.ToString(),
         "shell-integration" => _config.ShellIntegration ? "true" : "false",
         "restore-commands" => _config.RestoreCommands ? "true" : "false",
         "restore-buffer" => _config.RestoreBuffer ? "true" : "false",
@@ -1066,6 +1067,8 @@ internal partial class Program
             return "error: cursor-blink-ms must be a positive integer";
         if (key == "quick-terminal-size" && (!int.TryParse(value.Trim(), out int qs) || qs is < 40 or > 90))
             return "error: quick-terminal-size must be an integer from 40 through 90";
+        if (key == "notification-duration" && (!int.TryParse(value.Trim(), out int nd) || nd is < 1 or > 120))
+            return "error: notification-duration must be an integer from 1 through 120";
         if (key == "quick-terminal-hotkey")
         {
             if (SetQuickHotkey(value.Trim(), () => WriteConfigKey(key, value.Trim())) is { } error) return error;

@@ -46,6 +46,29 @@ public class TerminalConfigTests
     }
 
     [Fact]
+    public void NotificationDuration_DefaultsToTenSeconds()
+    {
+        Assert.Equal(10, TerminalConfig.Parse("").NotificationDuration);
+        Assert.Equal(10, TerminalConfig.Parse(TerminalConfig.DefaultText).NotificationDuration);
+        Assert.Contains("notification-duration = 10", TerminalConfig.DefaultText);
+    }
+
+    [Theory]
+    [InlineData("1", 1)]
+    [InlineData("30", 30)]
+    [InlineData("120", 120)]
+    [InlineData("0", 1)]
+    [InlineData("-1", 1)]
+    [InlineData("121", 120)]
+    [InlineData("2147483647", 120)]
+    [InlineData("2147483648", 10)]
+    [InlineData("invalid", 10)]
+    [InlineData("1.5", 10)]
+    [InlineData("", 10)]
+    public void NotificationDuration_ParsesAndClampsSeconds(string value, int expected)
+        => Assert.Equal(expected, TerminalConfig.Parse($"notification-duration = {value}").NotificationDuration);
+
+    [Fact]
     public void NotificationBadgeColors_HaveDefaultsAndParseOverrides()
     {
         var defaults = TerminalConfig.Parse("");
