@@ -196,24 +196,8 @@ internal partial class Program
     private void InstallCli() => RunInstaller(Wagterm.Pty.CliInstaller.Install);
     /// <summary>Opt-in: install Claude Code / Codex / Devin / generic agent status hooks.</summary>
     private void InstallHooks() => RunInstaller(Wagterm.Pty.AgentHooks.Install);
-    /// <summary>Opt-in: install agent notification hooks after explaining desktop text previews.</summary>
-    private void InstallNotifications()
-    {
-        const string notice = "Install text notification hooks for Claude Code, Codex and Devin?\n\n" +
-            "Completion alerts, questions and permission details (up to 200 characters) will appear in notifications.\n" +
-            "Claude Code and Codex include reply previews. Devin shows a completion message when reply text is unavailable.\n" +
-            "Claude permission alerts are generic and delayed until about 6 seconds without typing.\n" +
-            "Changed configs are backed up. Known manual WagTerm notification hooks are replaced, other hooks are kept.\n" +
-            "Devin JSONC is rewritten as JSON: comments and formatting remain only in the backup.\n" +
-            "Desktop notifications default to on: reply and command text may appear on the desktop. Settings are not changed.\n" +
-            "Restart agents after installation. Codex requires /hooks approval.";
-        if (MessageBoxW(_hwnd, notice, "Install Agent Notifications", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
-        System.Threading.Tasks.Task.Run(() =>
-        {
-            string result = Wagterm.Pty.AgentNotifications.Install();
-            Post(() => MessageBoxW(_hwnd, result, "Agent Notifications", MB_ICONINFORMATION));
-        });
-    }
+    /// <summary>Opt-in: install Claude Code / Codex / Devin notification hooks.</summary>
+    private void InstallNotifications() => RunInstaller(Wagterm.Pty.AgentNotifications.Install);
     /// <summary>Migrate pre-launcher Claude sessions: bind each pane to resume its current conversation.</summary>
     private void MakeClaudeResumable() => ShowToast(AdoptClaudeSessions(), 3200);
     /// <summary>Restart the active pane's Claude in YOLO mode (--dangerously-skip-permissions), resumed.</summary>
