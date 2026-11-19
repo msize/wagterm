@@ -711,13 +711,15 @@ internal partial class Program : ISessionHost, IWindowHost
         // leaving the window invisible and unreachable — clamp it onto the nearest visible work area first.
         if (_geoValid) ClampGeoToVisibleScreen(ref _geoX, ref _geoY, ref _geoW, ref _geoH);
         _creating = this;                    // so the WindowProc trampoline can resolve us during CreateWindowExW
+        // Keep parent Direct2D presents out of native child controls (the inline rename EDIT).
+        // Otherwise every terminal redraw paints over the field before its own WM_PAINT restores it.
         _hwnd = _isQuickWindow
-            ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, ClassName, "WagTerm quick terminal", WS_POPUP,
+            ? CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, ClassName, "WagTerm quick terminal", WS_POPUP | WS_CLIPCHILDREN,
                 0, 0, 640, 480, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero)
             : _geoValid
-            ? CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW,
+            ? CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 _geoX, _geoY, _geoW, _geoH, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero)
-            : CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW,
+            : CreateWindowExW(0, ClassName, DisplayName, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 660, IntPtr.Zero, IntPtr.Zero, hInstance, IntPtr.Zero);
         _creating = null;
         if (_hwnd == IntPtr.Zero)
