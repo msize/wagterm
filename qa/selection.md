@@ -1,8 +1,9 @@
 # Selection
 
-What happens to a selection while the buffer moves under it. Every case here is a bug that shipped.
+Mouse selection routing and what happens to a selection while the buffer moves under it.
+Every case here is a bug that shipped.
 
-**The rule they all serve:** a selection may only name lines its screen can SHOW, and the highlight
+**The buffer-movement rule:** a selection may only name lines its screen can SHOW, and the highlight
 and the clipboard read the same cells — so what lands on the clipboard is always what is visibly
 highlighted.
 
@@ -16,6 +17,29 @@ Setup for every case: sandbox instance per `qa/product.md`, `copy-on-select = fa
 `copy-on-ctrl-c = true`, unless the case says otherwise. Fixtures print **distinct** text per line
 throughout — with identical lines, a selection that slid onto different rows compares equal to the
 original and passes, which is the exact defect being tested for.
+
+---
+
+## Mouse-tracking apps receive both presses of a double-click
+
+**Guards:** a drag went to the app while a double-click created WagTerm's blue word selection.
+Both highlights then survived independently, and the app received an unmatched second release.
+
+**Setup:** run a mouse-tracking TUI such as Codex.
+
+**Steps:**
+1. Drag over text, then double-click another word.
+2. Drag over different text again.
+3. Hold Shift and double-click, wait at least one second, then hold Shift and drag elsewhere.
+4. Repeat ordinary double-click and drag at a shell prompt after exiting the TUI.
+
+**Expect:** steps 1 and 2 use only the app's selection. Step 3 uses WagTerm's blue selection for
+both gestures, and the Shift+drag extends its word selection. Step 4 uses WagTerm's selection for
+both gestures. `SessionInputTests` checks that the app receives two press/release pairs for an
+ordinary double-click and no mouse reports for Shift+double-click.
+
+**Fails when:** `WM_LBUTTONDBLCLK` ignores mouse reporting or the Shift override, or a locally
+handled press leaks an unmatched release to the app.
 
 ---
 

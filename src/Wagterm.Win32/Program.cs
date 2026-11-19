@@ -205,6 +205,8 @@ internal partial class Program : ISessionHost, IWindowHost
     private string? _pressBtn; // chrome button id pressed (fires on release over the same button)
     private bool _mouseTracking; // TrackMouseEvent armed (for WM_MOUSELEAVE)
     private bool _rbtnForwarded; // right-button press was forwarded to the app (mouse reporting), so forward the release too
+    private bool _lbtnForwarded; // a left press was forwarded: gates its release and held-motion reports
+    private bool _leftPressInContent; // latest left press reached terminal handling
     private const int HoverTimer = 8;   // WM_TIMER id for the hover fade
     private bool _chromeDark = true; // active theme is dark (set by RecomputeChrome)
     private string? _toastText;

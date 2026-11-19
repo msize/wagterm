@@ -93,6 +93,9 @@
 
 ## A real Windows terminal
 
+- **Mouse in TUIs**: mouse-tracking applications receive left clicks, drags and double-clicks.
+  Ctrl+click opens hovered links. Hold Shift to select text with WagTerm instead: Shift+double-click
+  selects a word, and Shift+click or Shift+drag extends an existing selection.
 - **Default Terminal Application**: register wagterm from *Settings → General* (per-user, no admin,
   one-click revert) and every console app you launch — `cmd` from Win+R, double-clicked `.exe`s —
   opens as an wagterm session via the ConPTY handoff, titled by the app.

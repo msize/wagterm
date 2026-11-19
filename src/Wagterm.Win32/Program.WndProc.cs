@@ -413,6 +413,8 @@ internal partial class Program
                 }
 
             case WM_LBUTTONDOWN:
+                _leftPressInContent = false;
+                _lbtnForwarded = false;
                 DismissHoverTip();
                 {
                     int mx = DipX(lParam), my = DipY(lParam);   // device px -> DIP layout
@@ -479,10 +481,12 @@ internal partial class Program
                     if (KeyDown(VK_CONTROL) && _linkUrl is { } lurl) { OpenLink(lurl); return IntPtr.Zero; }
                     bool shiftDn = KeyDown(VK_SHIFT);
                     var em0 = _session?.Emulator;
-                    if (em0 is not null && em0.MouseReporting && !shiftDn) { SendMousePx(0, lParam, true); SetCapture(hwnd); return IntPtr.Zero; }
+                    if (em0 is not null && em0.MouseReporting && !shiftDn)
+                    { _leftPressInContent = true; _lbtnForwarded = true; SendMousePx(0, lParam, true); SetCapture(hwnd); return IntPtr.Zero; }
                     // Text selection (app not grabbing the mouse, or Shift held to override).
                     if (PaneAt(mx, my) is { } h0)
                     {
+                        _leftPressInContent = true;
                         var (line, col) = CellAtPx(h0.pane, h0.ox, h0.oy, h0.cw, h0.ch, mx, my);
                         if (Environment.TickCount - _lastClickMs < 400 && _clickCount >= 2)  // triple-click -> line
                         { SelectLine(h0.pane, line); _clickCount = 3; _selMoved = true; }
@@ -525,20 +529,27 @@ internal partial class Program
                     else if (sp is not null) FinalizeSelection(sp);                   // copy-on-select
                     return IntPtr.Zero;
                 }
-                if (InContent(lParam)) { SendMousePx(0, lParam, false); }
+                if (_lbtnForwarded) { _lbtnForwarded = false; SendMousePx(0, lParam, false); }
                 ReleaseCapture(); return IntPtr.Zero;
 
             case WM_LBUTTONDBLCLK:
                 {
                     int mx = DipX(lParam), my = DipY(lParam);   // device px -> DIP layout
+                    if (_helpOpen || _setOpen || _palette != PaletteKind.None) return IntPtr.Zero;
                     if (_dashboardOpen) { DashboardClick(mx, my, doubleClick: true); return IntPtr.Zero; }
                     if (mx < (int)_sidebarW && my >= (int)TitleBarH && my < ClientH() - (int)FooterH)
                     {
                         var item = RowAt(my);
                         if (item is not null) { StartRename(item); return IntPtr.Zero; }
                     }
-                    else if (PaneAt(mx, my) is { } h0)  // double-click selects the word
+                    else if (PaneAt(mx, my) is { } h0)  // double-click in terminal content
                     {
+                        // A chrome/overlay/link press consumes the whole double-click: no app press or word selection.
+                        if (!_leftPressInContent) return IntPtr.Zero;
+                        // Windows replaces the second DOWN with DBLCLK. Mouse-tracking apps still
+                        // need that press, while Shift keeps word selection in the terminal.
+                        if (h0.pane.S.Emulator.MouseReporting && !KeyDown(VK_SHIFT))
+                        { _lbtnForwarded = true; SendMousePx(0, lParam, true); SetCapture(hwnd); return IntPtr.Zero; }
                         var (line, col) = CellAtPx(h0.pane, h0.ox, h0.oy, h0.cw, h0.ch, mx, my);
                         SelectWord(h0.pane, line, col);
                         _clickCount = 2; _lastClickMs = Environment.TickCount; _selMoved = true; _selecting = false;
@@ -612,8 +623,9 @@ internal partial class Program
                         return IntPtr.Zero;
                     }
                     var em = _session?.Emulator;
-                    if (em is not null && em.MouseReportsMotion && InContent(lParam))
-                        SendMousePx(32 + (((long)wParam & MK_LBUTTON) != 0 ? 0 : 3), lParam, true);
+                    bool leftHeld = ((long)wParam & MK_LBUTTON) != 0;
+                    if (em is not null && em.MouseReportsMotion && InContent(lParam) && (!leftHeld || _lbtnForwarded))
+                        SendMousePx(leftHeld ? 32 : 35, lParam, true);
                     return IntPtr.Zero;
                 }
 

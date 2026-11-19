@@ -18,6 +18,11 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/Wagterm.Pty/Wagterm.Pty.csproj" />
+    <!-- Reflection-based input tests must inspect a freshly built UI assembly. -->
+    <ProjectReference Include="../../src/Wagterm.Win32/Wagterm.Win32.csproj"
+                      ReferenceOutputAssembly="false"
+                      SkipGetTargetFrameworkProperties="true"
+                      Private="false" />
     <!-- wagtermctl arg parsing (FrameShmCli) is unit-tested here; the exe reference is harmless. -->
     <ProjectReference Include="../../src/Wagterm.Ctl/Wagterm.Ctl.csproj" />
   </ItemGroup>
