@@ -11,6 +11,10 @@ public static partial class AgentNotifications
         try {
           $o = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.Encoding]::UTF8).ReadToEnd() | ConvertFrom-Json
           if (-not $o -or $Agent -notin @('claude', 'codex', 'devin')) { exit 0 }
+          # Opt in only after configuring Codex's actual approval-prompt OSC 9 notifications.
+          # PermissionRequest precedes reviewer routing and cannot identify a human wait.
+          if ($Agent -eq 'codex' -and $o.hook_event_name -eq 'PermissionRequest' -and
+              $env:WAGTERM_CODEX_APPROVAL_ALERTS -ceq 'tui') { exit 0 }
           if ($Agent -eq 'claude') {
             # Devin imports Claude's hooks too; nested print runs also inherit the pane identity.
             if ($env:DEVIN_PROJECT_DIR) { exit 0 }

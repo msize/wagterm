@@ -43,6 +43,33 @@
   `desktop-notifications` defaults to `true`, so previews can appear on the desktop immediately.
   Reply and command text can be visible on the desktop: only install if that is appropriate for
   the projects you work on. Hooks stay silent outside WagTerm.
+
+  **Codex Auto-review:** `PermissionRequest` fires before Codex chooses between the automatic
+  reviewer and the user. Turn metadata cannot identify mandatory human checkpoints, reviewer
+  handoffs, or tool-specific approval settings. The default hook therefore keeps permission alerts.
+  To use Codex's actual approval-prompt notifications instead, configure its user `config.toml`:
+
+  ```toml
+  [tui]
+  notifications = ["approval-requested"]
+  notification_method = "osc9"
+  notification_condition = "always"
+  ```
+
+  Merge these keys into the existing `[tui]` table. Keep only `approval-requested` here to avoid
+  duplicates with the completion and question hooks. Then launch Codex from Git Bash with
+  `WAGTERM_CODEX_APPROVAL_ALERTS=tui codex` (include your usual Codex arguments). This explicit
+  opt-in suppresses only Codex's premature `PermissionRequest` notification hook. Actual shell,
+  file-edit, and elicitation approval overlays, including mandatory manual approvals in Auto-review
+  mode, emit OSC 9, which WagTerm already displays as a notification and badge. Configure all three keys before
+  opting in, otherwise real approval alerts may be missing. Removing the environment variable
+  restores hook alerts. The installer does not change these Codex settings automatically.
+  Claude and Devin, completion and question hooks, and independent status hooks stay unchanged.
+  In this mode, manual approvals set `blocked` only if the separate status hooks are installed
+  (`wagtermctl install hooks`). OSC 9 itself does not set the agent status.
+  Status hooks can still briefly mark automatic reviews `blocked` until the next tool completes.
+  Codex 0.170's separate `request_permissions` overlay emits neither this notification nor a
+  `PermissionRequest` hook. That existing limitation affects both alert modes.
 - **In-app notification banners** (`wagtermctl notify`, OSC 9/777, agent hooks) stay visible for
   10 seconds by default. Change **Settings → Notifications → In-app banner duration (seconds)**
   or run `wagtermctl config set notification-duration 30` for a 30-second banner. The setting is

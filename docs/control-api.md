@@ -255,6 +255,24 @@ so its completion notification falls back to `Turn completed` when text is unava
 `desktop-notifications` defaults to `true`, so reply and command text can appear on the desktop
 immediately after installation, subject to Windows notification settings.
 
+For Codex, `WAGTERM_CODEX_APPROVAL_ALERTS=tui` opts out of the shared notification script's
+`PermissionRequest` handler only. All other values keep the default hook alerts. Claude and Devin
+ignore this variable. Configure Codex's user `[tui]` settings with
+`notifications = ["approval-requested"]`, `notification_method = "osc9"`, and
+`notification_condition = "always"` before opting in. Merge with the existing table. Codex then
+sends terminal notifications when it displays shell, file-edit, and elicitation approval prompts,
+including mandatory human checks and reviewer handoffs. WagTerm's existing OSC 9 handling delivers
+the banner and badge.
+Do not enable completion or question TUI notifications alongside the matching WagTerm hooks unless
+duplicate alerts are wanted. No `config.toml` changes are made by the installer. Independent status
+hooks remain unchanged, so an automatic review can still briefly set `blocked`. In this mode,
+manual approvals set `blocked` only when the separate status hooks (`install hooks`) are installed.
+OSC 9 itself does not change agent status. Codex 0.170's `request_permissions` overlay emits neither
+an approval notification nor a `PermissionRequest` hook, an existing limitation in both modes.
+
+The hook intentionally does not infer per-request routing from Codex transcripts or global
+`approvals_reviewer`: both can say Auto-review while a particular action requires a human.
+
 ## `session.bind` from a SessionStart hook
 
 `install hooks` makes the `SessionStart` hook of Claude Code, Codex and Devin send

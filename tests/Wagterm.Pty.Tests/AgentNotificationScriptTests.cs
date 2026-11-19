@@ -59,7 +59,7 @@ public class AgentNotificationScriptTests : IDisposable
         };
         foreach (string arg in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", _script, agent })
             start.ArgumentList.Add(arg);
-        foreach (string key in new[] { "DEVIN_PROJECT_DIR", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED", "WAGTERM_WINDOW_ID" })
+        foreach (string key in new[] { "DEVIN_PROJECT_DIR", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ATTENDED", "WAGTERM_WINDOW_ID", "WAGTERM_CODEX_APPROVAL_ALERTS" })
             start.Environment.Remove(key);
         start.Environment["WAGTERM_SESSION_ID"] = "pane-test";
         start.Environment["WAGTERM_PIPE"] = @"\\.\pipe\" + pipeName;
@@ -167,6 +167,48 @@ public class AgentNotificationScriptTests : IDisposable
             tool_name = tool, tool_input = new { command = "git status" },
         }), "blocked");
         Assert.Equal($"{tool}: git status", note.GetProperty("body").GetString());
+    }
+
+    [Fact]
+    public void CodexTuiApprovalModeSuppressesThePrematurePermissionHook()
+        => Assert.Empty(Event("codex", "PermissionRequest", new
+        {
+            tool_name = "Bash", tool_input = new { command = "git status" },
+        }, env: new() { ["WAGTERM_CODEX_APPROVAL_ALERTS"] = "tui" }));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("hooks")]
+    [InlineData("unknown")]
+    [InlineData("TUI")]
+    public void CodexPermissionAlertsRemainEnabledWithoutAnExactOptIn(string? mode)
+        => Notification(Event("codex", "PermissionRequest",
+            env: new() { ["WAGTERM_CODEX_APPROVAL_ALERTS"] = mode }), "blocked");
+
+    [Theory]
+    [InlineData("claude", "Notification")]
+    [InlineData("devin", "PermissionRequest")]
+    public void OtherAgentsIgnoreCodexTuiApprovalMode(string agent, string name)
+        => Notification(Event(agent, name, new
+        {
+            notification_type = "permission_prompt", message = "Approve command?",
+        }, env: new() { ["WAGTERM_CODEX_APPROVAL_ALERTS"] = "tui" }), "blocked");
+
+    [Theory]
+    [InlineData("Stop", "completed")]
+    [InlineData("PreToolUse", "blocked")]
+    [InlineData("PostToolUse", "active")]
+    [InlineData("UserPromptSubmit", "active")]
+    public void CodexTuiApprovalModeKeepsOtherHookEvents(string name, string status)
+    {
+        var requests = Event("codex", name, new
+        {
+            tool_name = "request_user_input", last_assistant_message = "Done.",
+        }, env: new() { ["WAGTERM_CODEX_APPROVAL_ALERTS"] = "tui" });
+        if (name is "PostToolUse" or "UserPromptSubmit")
+            Assert.Equal(status, Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
+        else Notification(requests, status);
     }
 
     [Fact]
