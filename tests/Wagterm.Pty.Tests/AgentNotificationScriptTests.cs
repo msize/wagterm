@@ -3,6 +3,7 @@ using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using Wagterm.Pty;
+using Xunit.Abstractions;
 
 namespace Wagterm.Pty.Tests;
 
@@ -10,9 +11,11 @@ public class AgentNotificationScriptTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "wagterm-notify-script-" + Guid.NewGuid().ToString("N"));
     private readonly string _script;
+    private readonly ITestOutputHelper _output;
 
-    public AgentNotificationScriptTests()
+    public AgentNotificationScriptTests(ITestOutputHelper output)
     {
+        _output = output;
         Directory.CreateDirectory(_dir);
         _script = Path.Combine(_dir, "notify.ps1");
         File.WriteAllText(_script, AgentNotifications.Script);
@@ -155,6 +158,195 @@ public class AgentNotificationScriptTests : IDisposable
         }), "blocked");
         Assert.Equal("Choose a library?", note.GetProperty("body").GetString());
         Assert.Equal("attention", note.GetProperty("category").GetString());
+    }
+
+    [Theory]
+    [InlineData("request_user_input_async")]
+    [InlineData("functions.request_user_input_async")]
+    public void AsyncQuestionIncludesItsTitleInTuiApprovalMode(string tool)
+    {
+        var note = Notification(Event("codex", "PreToolUse", new
+        {
+            tool_name = tool, tool_input = new { questions = new[] { new { title = "Choose a branch?" } } },
+        }, env: new() { ["WAGTERM_CODEX_APPROVAL_ALERTS"] = "tui" }), "blocked");
+        Assert.Equal("Choose a branch?", note.GetProperty("body").GetString());
+        Assert.Equal("attention", note.GetProperty("category").GetString());
+    }
+
+    [Theory]
+    [InlineData("PostToolUse")]
+    [InlineData("Stop")]
+    public void AsyncQuestionRemainsBlockedUntilItsAnswer(string name)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("branch-choice");
+        void Check(string status)
+        {
+            var requests = Event("codex", name, new { transcript_path = rollout.Path, last_assistant_message = "Done." });
+            if (name == "Stop")
+            {
+                var note = Notification(requests, status);
+                Assert.Equal("Done.", note.GetProperty("body").GetString());
+                if (status == "blocked")
+                {
+                    Assert.EndsWith("needs your answer", note.GetProperty("title").GetString());
+                    Assert.Equal("attention", note.GetProperty("category").GetString());
+                }
+            }
+            else Assert.Equal(status, Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
+        }
+        Check("blocked");
+        rollout.Answer("branch-choice");
+        Check(name == "Stop" ? "completed" : "active");
+    }
+
+    [Fact]
+    public void PartialAndUnrelatedAnswersKeepOtherQuestionsPending()
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("first", 2);
+        rollout.Ask("second");
+        void Check(string status)
+            => Assert.Equal(status, Assert.Single(Event("codex", "PostToolUse", new { transcript_path = rollout.Path }))
+                .GetProperty("args").GetProperty("status").GetString());
+        rollout.Answer("first", 0);
+        Check("blocked");
+        rollout.Answer("unrelated");
+        Check("blocked");
+        rollout.Answer("first", 1);
+        Check("blocked");
+        rollout.Answer("second");
+        Check("active");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void EveryIndexOfASingleCallMustBeAnswered(bool combinedReply)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("only-call", 2);
+        if (combinedReply) rollout.Answers("only-call", 0, 1);
+        else
+        {
+            rollout.Answer("only-call", 0);
+            var pending = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+            Assert.Equal("blocked", Assert.Single(pending).GetProperty("args").GetProperty("status").GetString());
+            rollout.Answer("only-call", 1);
+        }
+        var answered = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(answered).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Theory]
+    [InlineData("<environment_context>New date</environment_context>")]
+    [InlineData("<user_action>Client metadata</user_action>")]
+    [InlineData("<recommended_plugins>Client metadata</recommended_plugins>")]
+    [InlineData("Chat from Claude: you have inbox mail from reviewer: changes requested")]
+    [InlineData("Chat from reviewer: you have inbox mail from reviewer: changes requested")]
+    [InlineData("Chat from Kimi: you have inbox mail from reviewer: changes requested")]
+    [InlineData("Chat from WagFlow: you have inbox mail from author: changes requested")]
+    [InlineData("# AGENTS.md instructions for C:/src/project\nProject instructions")]
+    public void InjectedUserItemsDoNotClearTheRemainingQuestion(string text)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("call", 2);
+        rollout.Answer("call", 0);
+        rollout.UserMessage(text);
+        var pending = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("blocked", Assert.Single(pending).GetProperty("args").GetProperty("status").GetString());
+        rollout.Answer("call", 1);
+        var answered = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(answered).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public void TruncatedReplyEnvelopeCannotCauseRegexBacktracking()
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("call");
+        rollout.UserMessage("<send_user_message_question_reply>" + new string(' ', 8000));
+        var requests = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public void LargeRolloutStopFinishesWithinTheNotificationHookTimeout()
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Noise(31 * 1024 * 1024);
+        rollout.Ask("pending");
+        var watch = Stopwatch.StartNew();
+        Notification(Event("codex", "Stop", new { transcript_path = rollout.Path, last_assistant_message = "Done." }), "blocked");
+        watch.Stop();
+        _output.WriteLine($"Whole Stop hook, {new FileInfo(rollout.Path).Length} bytes: {watch.Elapsed.TotalSeconds:F3} seconds.");
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10), $"Stop hook exceeded its configured timeout: {watch.Elapsed}");
+    }
+
+    [Fact]
+    public void PreToolUseToleratesALockedTranscript()
+    {
+        string path = Path.Combine(_dir, "unreadable.jsonl");
+        File.WriteAllText(path, """{"type":"session_meta","payload":{"source":"cli"}}""" + "\n");
+        using var writer = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var note = Notification(Event("codex", "PreToolUse", new
+        {
+            transcript_path = path, tool_name = "request_user_input_async",
+            tool_input = new { questions = new[] { new { title = "Choose?" } } },
+        }), "blocked");
+        Assert.Equal("Choose?", note.GetProperty("body").GetString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PendingQuestionSurvivesAnOpenWriterAndAnIncompleteLastRecord(bool namespaced)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("call", name: namespaced ? "functions.request_user_input_async" : "request_user_input_async");
+        File.AppendAllText(rollout.Path, """{"type":"response_item","payload":{"role":"user","content":""");
+        using var writer = File.Open(rollout.Path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        var requests = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("blocked", Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Theory]
+    [InlineData("Skip that question and continue.")]
+    [InlineData("<turn_aborted>Cancelled by the user</turn_aborted>")]
+    public void NewUserInstructionOrCancellationSupersedesAnOldAsyncQuestion(string text)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("old");
+        rollout.UserMessage(text);
+        var requests = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Theory]
+    [InlineData("event")]
+    [InlineData("developer")]
+    [InlineData("user")]
+    public void CancellationClearsQuestionsBeforeATurnStartedByPeerMail(string shape)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("cancelled", 2);
+        rollout.Answer("cancelled", 0);
+        rollout.Abort(shape);
+        rollout.UserMessage("Chat from reviewer: you have inbox mail from reviewer: please continue");
+        var afterAbort = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(afterAbort).GetProperty("args").GetProperty("status").GetString());
+        rollout.Ask("new");
+        var afterNewQuestion = Event("codex", "PostToolUse", new { transcript_path = rollout.Path });
+        Assert.Equal("blocked", Assert.Single(afterNewQuestion).GetProperty("args").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public void NotificationPromptSubmitResumesWhileAnEarlierQuestionIsPending()
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("old");
+        var requests = Event("codex", "UserPromptSubmit", new { transcript_path = rollout.Path });
+        Assert.Equal("active", Assert.Single(requests).GetProperty("args").GetProperty("status").GetString());
     }
 
     [Theory]

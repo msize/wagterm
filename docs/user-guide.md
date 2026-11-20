@@ -28,7 +28,12 @@
   Claude permission alerts use the same `Notification(permission_prompt)` event as status hooks:
   a generic message after about six seconds without typing. Codex and Devin include tool details.
   Questions and permission requests mark the pane `blocked`; submitting a prompt or completing a
-  tool restores `active`. A Codex turn ending with a question also marks it `blocked`.
+  tool normally restores `active`. Codex async questions retain `blocked` across tool completion
+  and Stop until all questions are answered, the turn is cancelled, or ordinary user input supersedes
+  them. Injected context and wagloop peer mail do not clear pending questions. Both Codex hooks read
+  `transcript_path` for this state. A Codex turn ending with a question also marks it `blocked`.
+  After upgrading, rerun whichever of `wagtermctl install hooks` / `wagtermctl install notifications`
+  you already use (both if you use both), then restart Codex and enable/trust the updated hooks in `/hooks`.
   This installer is independent of status/resume setup and does not change Codex's `config.toml`
   or its existing `notify` program. It writes `%LOCALAPPDATA%/wagterm/wagterm-agent-notify.ps1`
   and merges hooks into `~/.claude/settings.json`, `~/.codex/hooks.json`, and

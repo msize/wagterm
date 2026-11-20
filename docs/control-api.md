@@ -249,7 +249,13 @@ A Codex reply ending in `?` also uses `attention` and `blocked`, with a "needs y
 Claude permission alerts deliberately use the same `Notification(permission_prompt)` event as
 status hooks: a generic message after about six seconds without typing. Codex and Devin include
 tool details. Prompt submission and tool completion restore
-`active`. The installer leaves `desktop-notifications` and Windows notification settings unchanged.
+`active` normally. Codex async questions retain `blocked` across tool completion and Stop until
+all questions are answered, the turn is cancelled, or ordinary user input supersedes them. Injected
+context and wagloop peer mail do not clear them. Both Codex hooks read `transcript_path` for this state.
+When upgrading, rerun whichever of `wagtermctl install hooks` / `wagtermctl install notifications`
+you already use (both if you use both), then restart Codex and enable/trust the updated hooks in `/hooks`.
+The installer leaves
+`desktop-notifications` and Windows notification settings unchanged.
 Claude Code and Codex provide reply previews. Devin's documented Stop payload has no reply text,
 so its completion notification falls back to `Turn completed` when text is unavailable.
 `desktop-notifications` defaults to `true`, so reply and command text can appear on the desktop
@@ -270,8 +276,10 @@ manual approvals set `blocked` only when the separate status hooks (`install hoo
 OSC 9 itself does not change agent status. Codex 0.170's `request_permissions` overlay emits neither
 an approval notification nor a `PermissionRequest` hook, an existing limitation in both modes.
 
-The hook intentionally does not infer per-request routing from Codex transcripts or global
+For permission alerts, the hook intentionally does not infer per-request routing from Codex transcripts or global
 `approvals_reviewer`: both can say Auto-review while a particular action requires a human.
+Transcript inspection is limited to async question state. The legacy `wagterm-codex-notify.ps1`
+script is a silent compatibility shim so it cannot overwrite the hooks' pending-question status.
 
 ## `session.bind` from a SessionStart hook
 

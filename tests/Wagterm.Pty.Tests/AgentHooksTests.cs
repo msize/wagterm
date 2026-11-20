@@ -83,6 +83,41 @@ public class AgentHooksTests
         Assert.Null(AgentHooks.MergeCodexHooks("{ not valid json", CodexScript));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void InstallCodexRetiresLegacyNotifyOnlyAfterAValidMerge(bool valid)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "wagterm-codex-install-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string config = Path.Combine(directory, "hooks.json");
+        string script = Path.Combine(directory, "status.ps1");
+        string notify = Path.Combine(directory, "notify.ps1");
+        string original = valid ? "{}" : "{invalid";
+        try
+        {
+            File.WriteAllText(config, original);
+            File.WriteAllText(script, "old status");
+            File.WriteAllText(notify, "old legacy notify");
+            string result = AgentHooks.InstallCodex(config, script, notify);
+            if (valid)
+            {
+                Assert.Contains("status + resume hooks", result);
+                Assert.NotNull(JsonNode.Parse(File.ReadAllText(config))!["hooks"]);
+                Assert.Equal(AgentHooks.CodexHookScript, File.ReadAllText(script));
+                Assert.Equal(AgentHooks.CodexNotifyScript, File.ReadAllText(notify));
+            }
+            else
+            {
+                Assert.Contains("refused", result);
+                Assert.Equal(original, File.ReadAllText(config));
+                Assert.Equal("old status", File.ReadAllText(script));
+                Assert.Equal("old legacy notify", File.ReadAllText(notify));
+            }
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
     [Fact]
     public void MergeDevin_UsesNativeLifecycleEventsAndPreservesConfig()
     {
@@ -181,7 +216,6 @@ public class AgentHooksTests
         // The status push must carry a target = its own WAGTERM_SESSION_ID; otherwise the server
         // routes to the *focused* pane and multi-session status lands on the wrong dot.
         Assert.Contains("\"target\":\"' + $env:WAGTERM_SESSION_ID + '\"", AgentHooks.WrapperScript);
-        Assert.Contains("\"target\":\"' + $env:WAGTERM_SESSION_ID + '\"", AgentHooks.CodexNotifyScript);
         Assert.Contains("\"target\":\"' + $env:WAGTERM_SESSION_ID + '\"", AgentHooks.CodexHookScript);
         Assert.Contains("\"target\":\"' + $env:WAGTERM_SESSION_ID + '\"", GenericAgentInstaller.Block);
     }

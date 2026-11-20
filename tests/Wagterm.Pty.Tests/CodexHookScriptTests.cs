@@ -45,8 +45,14 @@ public class CodexHookScriptTests : IDisposable
     }
 
     /// <summary>Run the script and return the status it pushed, or null when it pushed nothing.</summary>
-    private string? Run(string state, string stdin, bool inWagterm = true)
+    private string? Run(string state, string stdin, bool inWagterm = true, string? script = null)
     {
+        string path = _script;
+        if (script is not null)
+        {
+            path = Path.Combine(_dir, "legacy-notify.ps1");
+            File.WriteAllText(path, script);
+        }
         string pipeName = "wagterm-test-codex-hook-" + Guid.NewGuid().ToString("N");
         using var server = new NamedPipeServerStream(pipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
         Task<string?> received = Task.Run(async () =>
@@ -62,7 +68,7 @@ public class CodexHookScriptTests : IDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
         };
-        foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", _script, state }) start.ArgumentList.Add(a);
+        foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, state }) start.ArgumentList.Add(a);
         start.Environment["WAGTERM_PIPE"] = pipeName;
         if (inWagterm) start.Environment["WAGTERM_SESSION_ID"] = "pane-x";
         else start.Environment.Remove("WAGTERM_SESSION_ID");
@@ -93,6 +99,30 @@ public class CodexHookScriptTests : IDisposable
 
     [Fact]
     public void StopOnAQuestionIsBlocked() => Assert.Equal("blocked", Run("stop", Event("Stop", "Shall I push it?  ")));
+
+    [Fact]
+    public void LegacyNotifyIsSilent()
+        => Assert.Null(Run("""{"type":"agent-turn-complete","last-agent-message":"Done."}""", "", script: AgentHooks.CodexNotifyScript));
+
+    [Theory]
+    [InlineData("active", "PostToolUse", "active")]
+    [InlineData("stop", "Stop", "completed")]
+    public void AsyncQuestionRemainsBlockedUntilAnswered(string state, string name, string afterAnswer)
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("branch-choice");
+        Assert.Equal("blocked", Run(state, Event(name, "Done.", rollout.Path)));
+        rollout.Answer("branch-choice");
+        Assert.Equal(afterAnswer, Run(state, Event(name, "Done.", rollout.Path)));
+    }
+
+    [Fact]
+    public void UserPromptSubmitResumesDespiteAnOlderPendingQuestion()
+    {
+        var rollout = new CodexQuestionRollout(_dir);
+        rollout.Ask("old");
+        Assert.Equal("active", Run("active", Event("UserPromptSubmit", transcript: rollout.Path)));
+    }
 
     [Fact]
     public void NestedExecRunPushesNothing() => Assert.Null(Run("active", Event("PostToolUse", transcript: Rollout("exec"))));

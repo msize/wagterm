@@ -6,6 +6,8 @@ public static partial class AgentNotifications
         """
         param([string]$Agent)
         # Shared Claude/Codex/Devin notification hook. Stdout is reserved for hook decisions.
+        """ + "\n" + CodexQuestionState.Script + "\n" +
+        """
         if (-not $env:WAGTERM_SESSION_ID) { exit 0 }
         $ErrorActionPreference = 'Stop'
         try {
@@ -61,10 +63,11 @@ public static partial class AgentNotifications
           $body = ''; $title = ''; $category = 'attention'; $state = ''
           switch ($o.hook_event_name) {
             'Stop' {
+              $pendingQuestion = $Agent -eq 'codex' -and (Test-WagtermPendingQuestion $o)
               $body = Short $o.last_assistant_message
               if (-not $body) { $body = 'Turn completed' }
               $title = "$name finished$suffix"; $category = 'ok'; $state = 'completed'
-              if ($Agent -eq 'codex' -and (Text $o.last_assistant_message).TrimEnd().EndsWith('?')) {
+              if ($Agent -eq 'codex' -and ($pendingQuestion -or (Text $o.last_assistant_message).TrimEnd().EndsWith('?'))) {
                 $title = "$name needs your answer$suffix"; $category = 'attention'; $state = 'blocked'
               }
             }
@@ -87,14 +90,21 @@ public static partial class AgentNotifications
               $title = "$name needs permission$suffix"; $state = 'blocked'
             }
             'PreToolUse' {
-              if ($o.tool_name -notin @('AskUserQuestion', 'ask_user_question', 'request_user_input')) { exit 0 }
+              $tool = (Text $o.tool_name) -replace '^functions\.', ''
+              if ($tool -notin @('AskUserQuestion', 'ask_user_question', 'request_user_input', 'request_user_input_async')) { exit 0 }
               $questions = @($o.tool_input.questions)
               if ($questions.Count -gt 0) { $body = Short $questions[0].question }
+              if (-not $body -and $questions.Count -gt 0) { $body = Short $questions[0].title }
               if (-not $body) { $body = 'Waiting for your answer' }
               $title = "$name asks you to choose$suffix"; $state = 'blocked'
             }
             'UserPromptSubmit' { Push 'session.status' @{ status = 'active' }; exit 0 }
-            'PostToolUse' { Push 'session.status' @{ status = 'active' }; exit 0 }
+            'PostToolUse' {
+              # Codex 0.171 records the function_call before PostToolUse, including async questions.
+              $pendingQuestion = $Agent -eq 'codex' -and (Test-WagtermPendingQuestion $o)
+              $status = if ($pendingQuestion) { 'blocked' } else { 'active' }
+              Push 'session.status' @{ status = $status }; exit 0
+            }
             default { exit 0 }
           }
           Push 'session.status' @{ status = $state }

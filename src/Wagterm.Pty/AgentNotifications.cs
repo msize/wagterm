@@ -94,7 +94,7 @@ public static partial class AgentNotifications
             {
                 "claude" => "^AskUserQuestion$",
                 "devin" => "^ask_user_question$",
-                _ => "^(request_user_input|ask_user_question)$",
+                _ => @"^(?:functions\.)?(?:request_user_input(?:_async)?|ask_user_question)$",
             }),
             ("UserPromptSubmit", null),
             ("PostToolUse", null),
@@ -118,9 +118,17 @@ public static partial class AgentNotifications
                         !value.TryGetValue<string>(out var previous)) continue;
                     if (previous == command || IsLegacyHook(previous, agent, home, evt))
                     {
-                        if (previous == command && !installed &&
-                            JsonNode.DeepEquals(group["matcher"], JsonValue.Create(matcher)))
+                        bool sameMatcher = JsonNode.DeepEquals(group["matcher"], JsonValue.Create(matcher));
+                        if (previous == command && !installed && (sameMatcher || handlers.Count == 1))
                         {
+                            // Codex indexes trust/enabled state by group and handler position. Upgrade
+                            // a group owned solely by this hook in place without shifting its neighbours.
+                            if (!sameMatcher)
+                            {
+                                if (matcher is null) group.AsObject().Remove("matcher");
+                                else group["matcher"] = matcher;
+                                changed = true;
+                            }
                             installed = true;
                             continue;
                         }

@@ -10,8 +10,9 @@ namespace Wagterm.Pty;
 ///   UserPromptSubmit -> active, PostToolUse -> active, Stop -> completed,
 ///   Notification(permission_prompt) -> blocked.
 /// ~/.codex/hooks.json (same schema):
-///   UserPromptSubmit -> active, PostToolUse -> active, PermissionRequest -> blocked,
-///   Stop -> completed, or blocked when the last message is a question.
+///   UserPromptSubmit -> active, PostToolUse -> active, PermissionRequest -> blocked, Stop -> completed.
+///   PostToolUse/Stop stay blocked for unanswered async questions read from transcript_path;
+///   Stop also blocks on a trailing '?'.
 /// %APPDATA%/devin/config.json (JSONC, rewritten as JSON):
 ///   UserPromptSubmit -> active, PostToolUse -> active, PermissionRequest -> blocked, Stop -> completed.
 /// All three also get a SessionStart hook that binds the pane to the live session id, so a restart
@@ -75,44 +76,24 @@ public static class AgentHooks
         exit 0
         """;
 
-    /// <summary>Codex `notify` program: receives the event JSON as argv[0], maps it to a session status.
-    /// Superseded by <see cref="CodexHookScript"/>; still written so a config.toml `notify` line from an
-    /// earlier install keeps pointing at a script that exists.</summary>
+    /// <summary>Silent compatibility shim for old config.toml notify entries. Status belongs to
+    /// <see cref="CodexHookScript"/> so a legacy completion cannot overwrite a pending question.</summary>
     public const string CodexNotifyScript =
         """
         param([string]$Json)
-        # wagterm Codex notify hook: map Codex events to session status. No-op outside wagterm.
-        if (-not $env:WAGTERM_SESSION_ID) { exit 0 }
-        $state = 'completed'
-        try {
-          $o = $Json | ConvertFrom-Json
-          switch ($o.type) {
-            'agent-turn-complete' {
-              # A turn that ends on a question is waiting for the user, not done — surface it as
-              # blocked so the prompt stays visible (agterm #276).
-              $msg = "$($o.'last-agent-message')".TrimEnd()
-              if ($msg.EndsWith('?')) { $state = 'blocked' } else { $state = 'completed' }
-            }
-            default { $state = 'completed' }
-          }
-        } catch { }
-        $pipe = if ($env:WAGTERM_PIPE) { $env:WAGTERM_PIPE } else { 'wagterm' }
-        try {
-          $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', $pipe, [System.IO.Pipes.PipeDirection]::InOut)
-          $c.Connect(1000)
-          $w = New-Object System.IO.StreamWriter($c); $w.AutoFlush = $true
-          $w.WriteLine('{"cmd":"session.status","target":"' + $env:WAGTERM_SESSION_ID + '","args":{"status":"' + $state + '"}}')
-          $c.Dispose()
-        } catch { }
+        # Legacy notify is superseded by hooks.json. Never overwrite an unanswered question's status.
         exit 0
         """;
 
     /// <summary>Codex hooks.json handler: argv[0] is the status (or <c>stop</c>), the event JSON arrives on
-    /// stdin. Stop resolves to blocked when the turn ends on a question, like the notify script did.</summary>
+    /// stdin. PostToolUse/Stop consult transcript_path for pending async questions. Stop also blocks
+    /// when the last assistant message ends on a question.</summary>
     public const string CodexHookScript =
         """
         param([string]$State)
         # wagterm Codex hook: push a hooks.json event as session status. No-op outside wagterm.
+        """ + "\n" + CodexQuestionState.Script + "\n" +
+        """
         if (-not $env:WAGTERM_SESSION_ID) { exit 0 }
         $o = $null
         try { $o = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [Text.Encoding]::UTF8).ReadToEnd() | ConvertFrom-Json } catch { }
@@ -130,6 +111,8 @@ public static class AgentHooks
           $msg = "$($o.last_assistant_message)".TrimEnd()
           $State = if ($msg.EndsWith('?')) { 'blocked' } else { 'completed' }
         }
+        if ($State -ne 'blocked' -and $o.hook_event_name -in @('PostToolUse', 'Stop') -and
+            (Test-WagtermPendingQuestion $o)) { $State = 'blocked' }
         $pipe = if ($env:WAGTERM_PIPE) { $env:WAGTERM_PIPE } else { 'wagterm' }
         try {
           $c = New-Object System.IO.Pipes.NamedPipeClientStream('.', $pipe, [System.IO.Pipes.PipeDirection]::InOut)
@@ -309,6 +292,28 @@ public static class AgentHooks
         return candidate;
     }
 
+    internal static string InstallCodex(string configPath, string scriptPath, string notifyPath, string? bindScript = null)
+    {
+        try
+        {
+            string? existing = File.Exists(configPath) ? File.ReadAllText(configPath) : null;
+            string? merged = MergeCodexHooks(existing, scriptPath, bindScript);
+            if (merged is null)
+                return "Codex: refused — ~/.codex/hooks.json exists but isn't valid JSON; left untouched";
+
+            Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+            File.WriteAllText(scriptPath, CodexHookScript);
+            Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+            File.WriteAllText(configPath, merged);
+            // Retire the legacy status writer only after its replacement config was written.
+            // A refused merge must preserve the old notify program and its turn-end status.
+            File.WriteAllText(notifyPath, CodexNotifyScript);
+            return "Codex: status + resume hooks -> " + configPath +
+                "\n  Codex runs new hooks only once you trust them: open /hooks in Codex and approve them";
+        }
+        catch (Exception ex) { return "Codex: failed to install hooks: " + ex.Message; }
+    }
+
     /// <summary>Write the wrappers, merge the Claude, Codex and Devin hooks, and install the launcher and the
     /// generic bridge. Returns a multi-line human-readable summary covering every agent.</summary>
     public static string Install()
@@ -333,25 +338,7 @@ public static class AgentHooks
         }
 
         // --- Codex: hook script + hooks.json (JSON, so merged like settings.json; no TOML rewriting) ---
-        try
-        {
-            File.WriteAllText(CodexHookPath, CodexHookScript);
-            // An earlier install told the user to point config.toml's `notify` at this script: keep it
-            // there. It pushes the same state the Stop hook does, so leaving the line in is harmless.
-            File.WriteAllText(CodexNotifyPath, CodexNotifyScript);
-            string? codexExisting = File.Exists(CodexHooksPath) ? File.ReadAllText(CodexHooksPath) : null;
-            string? codexMerged = MergeCodexHooks(codexExisting, CodexHookPath, AgentBindPath);
-            if (codexMerged is null)
-                lines.Add("Codex: refused — ~/.codex/hooks.json exists but isn't valid JSON; left untouched");
-            else
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(CodexHooksPath)!);
-                File.WriteAllText(CodexHooksPath, codexMerged);
-                lines.Add("Codex: status + resume hooks -> " + CodexHooksPath);
-                lines.Add("  Codex runs new hooks only once you trust them: open /hooks in Codex and approve them");
-            }
-        }
-        catch (Exception ex) { lines.Add("Codex: failed to install hooks: " + ex.Message); }
+        lines.Add(InstallCodex(CodexHooksPath, CodexHookPath, CodexNotifyPath, AgentBindPath));
 
         lines.Add(InstallDevin(DevinConfigPath, WrapperPath, AgentBindPath));
 

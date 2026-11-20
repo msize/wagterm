@@ -53,7 +53,8 @@ public static class AgentSkill
         (A default blocked cue can also be set once via `blocked-sound =` in the config.)
 
         Better: run `wagtermctl install hooks` once. It wires Claude Code, Codex and Devin hooks so your
-        status updates automatically (active while working, blocked on permission prompts, completed on stop);
+        status updates automatically (active while working, blocked on permission prompts or pending
+        Codex async questions, completed on stop when no answer is pending);
         trust the Codex hooks once with /hooks. It also adds a SessionStart hook to Claude, Codex and Devin so the pane
         resumes your exact session after a restart or reboot, in any shell;
         and installs a generic PowerShell-profile bridge that marks any command matching `$env:WAGTERM_AGENT_RE`
@@ -64,6 +65,10 @@ public static class AgentSkill
         characters, potentially visible on the desktop). Claude Code and Codex include reply previews;
         Devin shows "Turn completed" when reply text is unavailable. It backs up configs and replaces known manual
         WagTerm notification hooks. Devin JSONC comments/formatting remain only in the backup.
+        Codex async questions keep blocked across tool completion and Stop until answered, cancelled,
+        or superseded by ordinary user input. Injected context and wagloop peer mail do not clear them.
+        When upgrading, rerun whichever integrations you already use: `wagtermctl install hooks`
+        and/or `wagtermctl install notifications` (both if you use both), keeping their scripts in sync.
         Restart the agents afterwards; enable/trust the new Codex hooks in /hooks.
 
         ## Manage sessions & workspaces

@@ -25,7 +25,7 @@ public class AgentNotificationsTests : IDisposable
     [Theory]
     [InlineData("claude", "Notification", "permission_prompt", "^AskUserQuestion$")]
     [InlineData("devin", "PermissionRequest", null, "^ask_user_question$")]
-    [InlineData("codex", "PermissionRequest", null, "^(request_user_input|ask_user_question)$")]
+    [InlineData("codex", "PermissionRequest", null, @"^(?:functions\.)?(?:request_user_input(?:_async)?|ask_user_question)$")]
     public void MergeAddsEventsAndPreservesExistingSettings(string agent, string permission, string? matcher, string question)
     {
         const string original = """{"other":42,"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}""";
@@ -76,6 +76,29 @@ public class AgentNotificationsTests : IDisposable
         Assert.Equal(3, stop.Count);
         Assert.Contains(statusScript, stop[0]!["hooks"]![0]!["command"]!.GetValue<string>());
         Assert.Contains(Script, stop[1]!["hooks"]![0]!["command"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ReinstallUpgradesTheCodexQuestionMatcherWithoutDuplicatingHandlers()
+    {
+        string previous = AgentNotifications.Merge(null, Script, "codex", Home)!;
+        var root = JsonNode.Parse(previous)!;
+        root["hooks"]!["PreToolUse"]![0]!["matcher"] = "^(request_user_input|ask_user_question)$";
+        var neighbour = new JsonObject
+        {
+            ["matcher"] = "exec_command",
+            ["hooks"] = new JsonArray(new JsonObject { ["type"] = "command", ["command"] = "echo user-owned" }),
+        };
+        root["hooks"]!["PreToolUse"]!.AsArray().Add(neighbour);
+        string updated = AgentNotifications.Merge(root.ToJsonString(), Script, "codex", Home)!;
+        var groups = JsonNode.Parse(updated)!["hooks"]!["PreToolUse"]!.AsArray();
+        Assert.Equal(2, groups.Count);
+        Assert.True(JsonNode.DeepEquals(neighbour, groups[1]));
+        string matcher = groups[0]!["matcher"]!.GetValue<string>();
+        foreach (string tool in new[] { "request_user_input", "request_user_input_async", "functions.request_user_input_async", "ask_user_question" })
+            Assert.Matches(matcher, tool);
+        Assert.DoesNotMatch(matcher, "exec_command");
+        Assert.Equal(updated, AgentNotifications.Merge(updated, Script, "codex", Home));
     }
 
     [Theory]
