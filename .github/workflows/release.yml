@@ -134,7 +134,7 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true    # every one is a hard build product now — a missing one is a broken release
 
-  # Package submissions stay disabled until WagTerm has its own registrations and credentials.
+  # WinGet submissions stay disabled until the first WagTerm package is approved.
   # Opens the version-bump PR to microsoft/winget-pkgs when enabled. Runs as a job here
   # (not a `release:` workflow) because releases published with GITHUB_TOKEN don't trigger
   # other workflows. Needs the WINGET_TOKEN secret — a classic PAT with the public_repo
@@ -175,18 +175,15 @@ jobs:
           # can't match the manifest's x64 installer node (this kept winget stuck at 0.10.0).
           .\wingetcreate.exe update msize.wagterm --version $version --urls "$url|x64" --submit --token $env:WINGET_TOKEN
 
-  # Packs and pushes the Chocolatey package to the community feed when enabled. Every version
+  # Packs and pushes the Chocolatey package after the GitHub Release is published. Every version
   # then goes through Chocolatey's moderation queue (automated validation + VM install test +
   # human review). Needs the CHOCO_API_KEY secret (from your community.chocolatey.org account);
-  # skips with a warning if unset. Rewrites version + download URL + checksum in-place from the
+  # fails if unset. Rewrites version + download URL + checksum in-place from the
   # release asset so the committed template can stay pinned at the last released version.
   chocolatey:
     needs: installer
-    if: ${{ false }}
+    if: github.repository == 'msize/wagterm'
     runs-on: windows-latest
-    # Best-effort: Chocolatey rejects new versions of a package whose first version is still in
-    # moderation (403), so this can legitimately fail early on — don't fail the whole release for it.
-    continue-on-error: true
     permissions:
       contents: read
     steps:
@@ -196,7 +193,7 @@ jobs:
         env:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
         run: |
-          if (-not $env:CHOCO_API_KEY) { Write-Warning 'CHOCO_API_KEY secret not set - skipping chocolatey publish'; exit 0 }
+          if (-not $env:CHOCO_API_KEY) { throw 'CHOCO_API_KEY secret is not set' }
           # Shared with choco-push.yml (the repush-a-moderated-version path) so the two can't drift.
           $version = '${{ github.ref_name }}'.TrimStart('v')
           ./packaging/chocolatey/publish.ps1 -Version $version -ApiKey $env:CHOCO_API_KEY -Repository '${{ github.repository }}'
