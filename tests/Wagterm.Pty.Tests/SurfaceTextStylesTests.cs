@@ -64,6 +64,26 @@ public class SurfaceTextStylesTests
     }
 
     [Fact]
+    public void HiddenCursorKeepsItsPositionButReportsInvisible()
+    {
+        using var session = new TerminalSession(40, 4);
+        using var server = new ControlServer(session);
+        Feed(session, "> draft\r\u001b[2C");
+        var shown = Read(server);
+        Assert.True(shown.GetProperty("cursor").GetProperty("visible").GetBoolean());
+        Feed(session, "\u001b[?25l");
+        var hidden = Read(server);
+        Assert.False(hidden.GetProperty("cursor").GetProperty("visible").GetBoolean());
+        Assert.Equal(shown.GetProperty("cursor").GetProperty("row").GetInt32(),
+            hidden.GetProperty("cursor").GetProperty("row").GetInt32());
+        Assert.Equal(shown.GetProperty("cursor").GetProperty("col").GetInt32(),
+            hidden.GetProperty("cursor").GetProperty("col").GetInt32());
+        Assert.Equal(shown.GetProperty("rows").GetRawText(), hidden.GetProperty("rows").GetRawText());
+        Feed(session, "\u001b[?25h");
+        Assert.True(Read(server).GetProperty("cursor").GetProperty("visible").GetBoolean());
+    }
+
+    [Fact]
     public void FlagsAndColourSpecsArePreservedAndEqualStylesMerge()
     {
         using var session = new TerminalSession(40, 4);
@@ -192,6 +212,11 @@ public class SurfaceTextStylesTests
         Assert.True(Runs(result)[1].GetProperty("faint").GetBoolean());
         Assert.Equal("idx:244", Runs(result)[1].GetProperty("fg").GetString());
         Assert.Equal(2, result.GetProperty("cursor").GetProperty("col").GetInt32());
+        Assert.True(result.GetProperty("cursor").GetProperty("visible").GetBoolean());
+        Feed(session, "\u001b[?25l");
+        Assert.False(Read(server).GetProperty("cursor").GetProperty("visible").GetBoolean());
+        Feed(session, "\u001b[?25h");
+        Assert.True(Read(server).GetProperty("cursor").GetProperty("visible").GetBoolean());
         AssertPlainParity(server);
     }
 
@@ -299,6 +324,15 @@ public class SurfaceTextStylesTests
             var args = new { styles = true, all = true };
             Assert.Equal(Read(managedServer, args).GetRawText(), Read(rustServer, args).GetRawText());
             AssertPlainParity(rustServer, args, new { all = true });
+            foreach (bool visible in new[] { false, true })
+            {
+                string sequence = visible ? "\u001b[?25h" : "\u001b[?25l";
+                Feed(managed, sequence);
+                Feed(rust, sequence);
+                Assert.Equal(visible, Read(managedServer, args).GetProperty("cursor").GetProperty("visible").GetBoolean());
+                Assert.Equal(visible, Read(rustServer, args).GetProperty("cursor").GetProperty("visible").GetBoolean());
+                Assert.Equal(Read(managedServer, args).GetRawText(), Read(rustServer, args).GetRawText());
+            }
         }
         finally { TerminalSession.CoreFactory = old; }
     }

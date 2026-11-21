@@ -181,8 +181,9 @@ public static class AgentSkill
           `--all` is the whole buffer, screen + scrollback (`--all` with `--lines` is refused, nothing read). A pane id
           reads the shell in that pane even while a pane overlay covers it; the overlay's own id, or no target while
           the focused pane holds one, reads the overlay (see Overlays)
-        - `wagtermctl session text --styles [--all|--lines N] [--target <id>]` — JSON `{cols,rows:[{row,runs}],cursor:{row,col}}`
-          from one snapshot. Runs carry `col,width,text,faint,bold,italic,underline,inverse,strike,fg,bg`; colours are
+        - `wagtermctl session text --styles [--all|--lines N] [--target <id>]` — JSON `{cols,rows:[{row,runs}],cursor:{row,col,visible}}`
+          from one snapshot. `visible` reports DECTCEM. A hidden cursor retains stale coordinates.
+          Runs carry `col,width,text,faint,bold,italic,underline,inverse,strike,fg,bg`; colours are
           `default`, `idx:N`, or `#rrggbb`. Coordinates/widths are grid cells, not character counts; negative rows are
           history. Trailing whitespace (even styled) and trailing empty rows trim like plain text. On a known composer
           using faint suggestions, inspect runs in the cursor row where `col+width > cursor.col`: an all-faint suffix

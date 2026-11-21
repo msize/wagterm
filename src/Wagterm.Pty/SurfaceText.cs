@@ -102,7 +102,7 @@ public static class SurfaceText
             }
             while (result.Count > 0 && result[^1].Runs.Count == 0) result.RemoveAt(result.Count - 1);
             return JsonSerializer.Serialize(new { cols, rows = result,
-                cursor = new { row = em.CursorRow, col = em.CursorCol } }, StyledJson);
+                cursor = new { row = em.CursorRow, col = em.CursorCol, visible = em.CursorVisible } }, StyledJson);
         }
     }
 

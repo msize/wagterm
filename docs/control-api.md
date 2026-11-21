@@ -93,7 +93,7 @@ The CLI prints the result object below; adding `--json` keeps the usual `{ok,res
 Omitting `styles` or setting it to false keeps the existing plain string result unchanged.
 
 ```json
-{"cols":80,"rows":[{"row":0,"runs":[{"col":0,"width":2,"text":"> ","faint":false,"bold":false,"italic":false,"underline":false,"inverse":false,"strike":false,"fg":"default","bg":"default"},{"col":2,"width":10,"text":"suggestion","faint":true,"bold":false,"italic":false,"underline":false,"inverse":false,"strike":false,"fg":"default","bg":"default"}]}],"cursor":{"row":0,"col":2}}
+{"cols":80,"rows":[{"row":0,"runs":[{"col":0,"width":2,"text":"> ","faint":false,"bold":false,"italic":false,"underline":false,"inverse":false,"strike":false,"fg":"default","bg":"default"},{"col":2,"width":10,"text":"suggestion","faint":true,"bold":false,"italic":false,"underline":false,"inverse":false,"strike":false,"fg":"default","bg":"default"}]}],"cursor":{"row":0,"col":2,"visible":true}}
 ```
 
 Rows and columns are zero-based grid coordinates. Row 0 is the top of the visible screen;
@@ -106,7 +106,9 @@ Colours are the program's specifications, independent of the current theme: `def
 attributes and colour specifications merge into one run.
 
 The cursor and runs come from one locked snapshot of the pane's emulator (the local replica for
-a server session). The cursor column can equal `cols` while wrapping is deferred. This is a
+a server session). `cursor.visible` reports the emulator's DECTCEM state. A hidden cursor
+can retain its previous coordinates, so coordinates alone do not establish visible input focus.
+The cursor column can equal `cols` while wrapping is deferred. This is a
 text-oriented attribute view: all trailing Unicode whitespace, including styled spaces and
 U+3000, is trimmed just like plain `session text`. Trailing empty rows are omitted; interior
 empty rows have `runs: []`. Joining run texts per row, then rows with newlines, reproduces the
