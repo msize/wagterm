@@ -1,7 +1,7 @@
-# Pack and push the Chocolatey package for a released version.
+# Pack and push the Chocolatey package for a released X.Y.0 version.
 #
 # Shared by two callers so the packaging steps can never drift apart:
-#   - release.yml's `chocolatey` job, on every tag
+#   - release.yml's `chocolatey` job, on vX.Y.0 tags
 #   - choco-push.yml (workflow_dispatch), to REPUSH a version whose package changed but whose
 #     version must not — which is exactly what Chocolatey moderation asks for ("repush your updated
 #     package with the exact same version").
@@ -10,7 +10,9 @@
 # version, download URL and checksum in place from the actual release asset.
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Version,      # e.g. 0.17.3 (no leading v)
+    [Parameter(Mandatory)]
+    [ValidatePattern('\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.0\z')]
+    [string]$Version,                          # e.g. 0.22.0 (no leading v)
     [Parameter(Mandatory)][string]$ApiKey,
     [string]$Repository = 'msize/wagterm',
     [string]$OutputDir = $env:RUNNER_TEMP

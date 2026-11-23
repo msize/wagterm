@@ -1,4 +1,4 @@
-# Push (or REPUSH) the Chocolatey package for an already-published release.
+# Push (or REPUSH) the Chocolatey package for an already-published X.Y.0 release.
 #
 # Chocolatey moderation asks for corrective changes to be repushed under the SAME version. The
 # release workflow can't do that: it runs on a tag and checks out the tagged tree, so re-running it
@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Released version to push, without the leading v (e.g. 0.21.3)'
+        description: 'Released X.Y.0 version to push, without the leading v (e.g. 0.22.0)'
         required: true
         type: string
 

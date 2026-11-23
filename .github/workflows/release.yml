@@ -175,14 +175,14 @@ jobs:
           # can't match the manifest's x64 installer node (this kept winget stuck at 0.10.0).
           .\wingetcreate.exe update msize.wagterm --version $version --urls "$url|x64" --submit --token $env:WINGET_TOKEN
 
-  # Packs and pushes the Chocolatey package after the GitHub Release is published. Every version
-  # then goes through Chocolatey's moderation queue (automated validation + VM install test +
+  # Packs and pushes only vX.Y.0 releases to Chocolatey after the GitHub Release is published.
+  # Patch releases stay on GitHub. Each Chocolatey version goes through moderation (validation + VM install test +
   # human review). Needs the CHOCO_API_KEY secret (from your community.chocolatey.org account);
   # fails if unset. Rewrites version + download URL + checksum in-place from the
   # release asset so the committed template can stay pinned at the last released version.
   chocolatey:
     needs: installer
-    if: github.repository == 'msize/wagterm'
+    if: github.repository == 'msize/wagterm' && endsWith(github.ref_name, '.0')
     runs-on: windows-latest
     permissions:
       contents: read
